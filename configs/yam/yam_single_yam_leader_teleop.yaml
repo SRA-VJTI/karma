@@ -1,0 +1,48 @@
+version: "1"
+
+session:
+  save_root: recordings
+  record_topic: yam_leader/record
+
+nodes:
+  # One USB Feetech active leader arm.
+  # Default wiring:
+  #   /dev/ttyACM0 -> leader arm
+  #   can1 -> follower arm being moved
+  - type: AgentNode
+    name: yam_leader
+    agent_class: robots_realtime.agents.teleoperation.gello_leader_agent:GelloLeaderAgent
+    agent_kwargs:
+      port: /dev/ttyACM0
+      robot_name: yam_follower
+      include_gripper: true
+      joint_signs: [-1, -1, -1, -1, -1, -1]
+    state_topics:
+      yam_follower: yam_follower/joint_state
+    loop_mode: flat_out
+    publish_freq: 100
+
+  # One YAM follower arm.
+  - type: RobotNode
+    name: yam_follower
+    robot_config: robot_configs/yam/follower_can1.yaml
+    cmd_topic: yam_leader/joint_pos
+    poll_freq: 200
+    startup_joint_pos: null
+    shutdown_joint_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    shutdown_duration_s: 3.0
+
+  # Connected Intel RealSense D405s.
+  - type: CameraNode
+    name: camera_top
+    driver: RealSenseCamera
+    device_id: "352122273221"
+    resolution: VGA
+    fps: 30
+
+  - type: CameraNode
+    name: camera_left
+    driver: RealSenseCamera
+    device_id: "352122271723"
+    resolution: VGA
+    fps: 30
