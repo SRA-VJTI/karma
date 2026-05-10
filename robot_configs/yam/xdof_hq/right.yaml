@@ -12,7 +12,7 @@ motor_chain:
   motor_offset: [0, 0, 0, 0, 0, 0, 0]
   motor_direction: [1, 1, 1, 1, 1, 1, 1]
   # channel: "can_right"
-  channel: "can_right"
+  channel: "can1"
   motor_chain_name: "yam_right"
   receive_mode:
     _target_: i2rt.motor_drivers.dm_driver.ReceiveMode
