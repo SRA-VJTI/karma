@@ -34,28 +34,32 @@ nodes:
       # --default-task; set here to override per client.
       task: "pack container"
 
-      # The current MolmoAct2-BimanualYAM server returns chunks shaped (30, 14)
-      # and advertises fps=10. Running the consumer at 10 Hz executes one model
-      # action per tick, giving ~3 s of chunk lookahead.
-      action_horizon: 30
+      # Server metadata currently advertises n_action_steps=10 and fps=10.
+      # Running the consumer at 10 Hz executes one model action per tick, giving
+      # ~1 s of chunk lookahead. Keep this aligned with the server metadata.
+      action_horizon: 10
       inference_mode: async              # sync | async | async_rate_limited | temporal_ensemble
       inference_interval_s: null         # optional rate cap for async modes
-      # Smooth chunk swaps. Server inference is ~1.1 s at 10 Hz (~11 ticks),
-      # so blend across most of the latency instead of hard switching.
-      min_smoothed_actions: 5
-      max_smoothed_actions: 15
-      # Extra per-tick EMA after chunk blending. Smaller = smoother but laggier;
-      # set to null or 1.0 to disable.
-      output_smoothing_alpha: 0.30
+      # Blend almost the full chunk so seams between successive inferences are
+      # invisible. At 10 Hz / horizon=10, blending 8-10 actions = 0.8-1 s of
+      # crossfade, which hides the boundary entirely.
+      min_smoothed_actions: 8
+      max_smoothed_actions: 10
+      # Stronger EMA to kill tick-to-tick jitter. 0.6 = 60% new + 40% prev;
+      # settles in ~3 ticks (0.3 s) — trade a little lag for silky motion.
+      output_smoothing_alpha: 0.6
 
       # By default, send raw camera frames as CHW uint8 and let the server/model
       # processor handle size. If bandwidth is an issue, set image_preprocess to
       # center_crop/resize/pad and target_image_size to e.g. 224.
       image_preprocess: none             # none | center_crop | resize | pad
       target_image_size: null            # int square or [H, W], used when not none
-      publish_policy_images: false
+      publish_policy_images: true
       clip_gripper: true
       require_server_protocol: true
+      # Enable to print chunk-delta stats every 2 s — useful for tuning
+      # max_joint_step_per_tick / max_action_delta_from_state if needed.
+      debug_action_stats: true
 
     state_topics:
       left:  left/joint_state

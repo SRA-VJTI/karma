@@ -370,6 +370,13 @@ def _host_worker(
                 except Exception:
                     pass
                 ctrl.send(_CTRL_OK)
+            elif msg == b"RELOAD_AGENT":
+                try:
+                    if hasattr(node, "reload_agent"):
+                        node.reload_agent()
+                except Exception:
+                    pass
+                ctrl.send(_CTRL_OK)
             else:
                 # Unknown command — send OK to unblock the requester
                 ctrl.send(_CTRL_OK)
@@ -453,6 +460,12 @@ class ProcessHost:
         """Tell the node subprocess to exit its paused state."""
         assert self._ctrl is not None
         self._ctrl.send(b"RESUME")
+        self._ctrl.recv()
+
+    def reload_agent(self) -> None:
+        """Tell the node subprocess to reload its agent (reconnect + reset)."""
+        assert self._ctrl is not None
+        self._ctrl.send(b"RELOAD_AGENT")
         self._ctrl.recv()
 
     def stop(self, timeout: float = 3.0) -> None:

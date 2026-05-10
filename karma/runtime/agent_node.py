@@ -29,6 +29,7 @@ Subscribed topics: state_topics.values() + image_topics.values()
 from __future__ import annotations
 
 import importlib
+import threading
 import time
 
 import numpy as np
@@ -111,6 +112,7 @@ class AgentNode(Node):
         self._normalize_gripper = normalize_gripper
         self._gripper_open_deg = gripper_open_deg
         self._gripper_closed_deg = gripper_closed_deg
+        self._agent_lock = threading.Lock()
 
     # ------------------------------------------------------------------
 
@@ -134,6 +136,29 @@ class AgentNode(Node):
         mod = importlib.import_module(module_path)
         return getattr(mod, cls_name)(**self._agent_kwargs)
 
+    def reload_agent(self) -> None:
+        """Build a fresh agent instance and swap it in while the step loop runs."""
+        if self._agent_class is None:
+            print(f"[{self.name}] reload_agent: no agent_class set, skipping")
+            return
+        print(f"[{self.name}] reloading agent …")
+        try:
+            new_agent = self._build_agent()
+            if hasattr(new_agent, "reset"):
+                new_agent.reset()
+        except Exception as exc:
+            print(f"[{self.name}] reload_agent failed: {exc}")
+            return
+        with self._agent_lock:
+            old_agent = self._agent
+            self._agent = new_agent
+        if old_agent is not None and hasattr(old_agent, "close"):
+            try:
+                old_agent.close()
+            except Exception:
+                pass
+        print(f"[{self.name}] agent reloaded OK")
+
     def step(self) -> None:
         obs: dict = {"timestamp": time.time()}
         for obs_key, topic in self._state_topics.items():
@@ -145,7 +170,9 @@ class AgentNode(Node):
             if data is not None:
                 obs[obs_key] = data
 
-        action = self._agent.act(obs)
+        with self._agent_lock:
+            agent = self._agent
+        action = agent.act(obs)
         ts = time.time()
 
         if "_record" in action:

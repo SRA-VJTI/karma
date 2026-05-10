@@ -153,6 +153,9 @@ class Session:
         self._episode_start_time: float | None = None
         self._recording_lock = threading.Lock()
 
+        # Event notification ring buffer for the TUI
+        self._events: deque = deque(maxlen=6)
+
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -241,7 +244,7 @@ class Session:
             self._episode_start_time = time.time()
             self._is_recording = True
 
-        # Delegate recording to all hosts
+        self.push_event("recording started")
         for host in self._hosts:
             try:
                 host.start_recording(save_dir)
@@ -257,7 +260,7 @@ class Session:
             self._episode_dir = None
             self._episode_start_time = None
 
-        # Delegate stop_recording to all hosts
+        self.push_event("recording saved" if save else "recording discarded")
         for host in self._hosts:
             try:
                 host.stop_recording()
@@ -290,6 +293,7 @@ class Session:
         if getattr(self, "_is_paused", False):
             return
         self._is_paused = True
+        self.push_event("paused")
         for host in self._hosts:
             try:
                 host.pause()
@@ -300,24 +304,50 @@ class Session:
         if not getattr(self, "_is_paused", False):
             return
         self._is_paused = False
+        self.push_event("resumed")
         for host in self._hosts:
             try:
                 host.resume()
             except Exception:
                 pass
-        # Optional: prime recording when the operator unpauses. Lets a policy
-        # eval config capture every rollout from the instant of handoff.
         if self._record_on_unpause and not self._is_recording:
             try:
                 self.start_episode()
             except Exception:
                 pass
 
+    def reload_agent(self, node_name: str | None = None) -> None:
+        """Send RELOAD_AGENT to AgentNode subprocesses.
+
+        If node_name is given, only reload that node; otherwise reload all
+        hosts that expose reload_agent() (i.e. AgentNode hosts).
+        """
+        sent = False
+        for host in self._hosts:
+            if node_name is not None and host.node_name != node_name:
+                continue
+            if hasattr(host, "reload_agent"):
+                try:
+                    host.reload_agent()
+                    self.push_event(f"policy reloaded: {host.node_name}")
+                    sent = True
+                except Exception as exc:
+                    self.push_event(f"reload failed: {exc}")
+        if not sent and node_name is not None:
+            self.push_event(f"reload: node '{node_name}' not found")
+
     def toggle_pause(self) -> None:
         if self.is_paused:
             self.resume()
         else:
             self.pause()
+
+    def push_event(self, msg: str) -> None:
+        self._events.appendleft((time.time(), msg))
+
+    @property
+    def recent_events(self) -> list[tuple[float, str]]:
+        return list(self._events)
 
     @property
     def log_dir(self) -> Path | None:

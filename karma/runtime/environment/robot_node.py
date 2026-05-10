@@ -185,8 +185,14 @@ class RobotNode(Node):
             except Exception as exc:
                 print(f"[{self.name}] Failed to park at shutdown pose: {exc}")
 
-        if hasattr(self._robot, "stop"):
-            self._robot.stop()
+        if self._robot is not None:
+            for method in ("close", "stop"):
+                if hasattr(self._robot, method):
+                    try:
+                        getattr(self._robot, method)()
+                    except Exception as exc:
+                        print(f"[{self.name}] Failed to {method} robot: {exc}")
+                    break
 
     def _move_to_pose(self, target: list[float], duration_s: float) -> None:
         """Smoothly interpolate robot to target joint position."""

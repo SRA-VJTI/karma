@@ -190,6 +190,18 @@ class AsyncMolmoAct2Agent(PolicyAgent):
         # Per-tick EMA on the selected action after chunk blending.
         # None / 1.0 disables. Smaller = smoother but laggier.
         output_smoothing_alpha: float | None = None,
+        # Optional hardware-side safety filters. These operate on the final
+        # absolute joint-position command emitted by the policy client, not on
+        # the model's raw chunk. Units are radians/tick for arm joints and
+        # normalized gripper units/tick for grippers.
+        max_joint_step_per_tick: float | None = None,
+        max_gripper_step_per_tick: float | None = None,
+        # Optional cap on how far a commanded absolute setpoint may be from the
+        # latest observed robot state. Useful when a raw model chunk begins with
+        # an OOD jump; units are radians / normalized gripper units.
+        max_action_delta_from_state: float | None = None,
+        max_gripper_delta_from_state: float | None = None,
+        debug_action_stats: bool = False,
         require_server_protocol: bool = True,
     ) -> None:
         valid_modes = ("sync", "async", "async_rate_limited", "temporal_ensemble")
@@ -250,8 +262,23 @@ class AsyncMolmoAct2Agent(PolicyAgent):
             output_smoothing_alpha = None
         if output_smoothing_alpha is not None and output_smoothing_alpha > 1.0:
             raise ValueError("output_smoothing_alpha must be in (0, 1], or null to disable")
+        for name, value in (
+            ("max_joint_step_per_tick", max_joint_step_per_tick),
+            ("max_gripper_step_per_tick", max_gripper_step_per_tick),
+            ("max_action_delta_from_state", max_action_delta_from_state),
+            ("max_gripper_delta_from_state", max_gripper_delta_from_state),
+        ):
+            if value is not None and value <= 0.0:
+                raise ValueError(f"{name} must be positive, or null to disable")
         self._output_smoothing_alpha = output_smoothing_alpha
+        self._max_joint_step_per_tick = max_joint_step_per_tick
+        self._max_gripper_step_per_tick = max_gripper_step_per_tick
+        self._max_action_delta_from_state = max_action_delta_from_state
+        self._max_gripper_delta_from_state = max_gripper_delta_from_state
+        self._debug_action_stats = bool(debug_action_stats)
+        self._last_action_stats_log_ts = 0.0
         self._last_output_action: np.ndarray | None = None
+        self._last_state: np.ndarray | None = None
         self.use_joint_state_as_action = False
 
         self.inference_interval_rate = (
@@ -304,6 +331,11 @@ class AsyncMolmoAct2Agent(PolicyAgent):
             "image_preprocess": self._image_preprocess,
             "target_image_size_hw": self._target_hw,
             "output_smoothing_alpha": self._output_smoothing_alpha,
+            "max_joint_step_per_tick": self._max_joint_step_per_tick,
+            "max_gripper_step_per_tick": self._max_gripper_step_per_tick,
+            "max_action_delta_from_state": self._max_action_delta_from_state,
+            "max_gripper_delta_from_state": self._max_gripper_delta_from_state,
+            "debug_action_stats": self._debug_action_stats,
             "task": self.task,
             **self._server_metadata,
         }
@@ -336,6 +368,7 @@ class AsyncMolmoAct2Agent(PolicyAgent):
             raise ValueError(f"MolmoAct2 state must be shape (14,), got {state.shape}")
         if not np.isfinite(state).all():
             raise ValueError("MolmoAct2 state contains non-finite values")
+        self._last_state = state.copy()
 
         request: Dict[str, Any] = {"state": state}
         display_images: Dict[str, np.ndarray] = {}
@@ -391,17 +424,66 @@ class AsyncMolmoAct2Agent(PolicyAgent):
         return action
 
     def _smooth_output_action(self, action: np.ndarray) -> np.ndarray:
-        """EMA-filter the one action emitted to RobotNode this tick."""
+        """Filter the one absolute joint-position command emitted this tick.
+
+        The model/server can occasionally return a chunk whose first setpoint is
+        too far from the robot's measured state, or whose consecutive setpoints
+        have hardware-unfriendly jumps.  EMA reduces jitter, while the optional
+        caps below make the final command stream physically smooth even when a
+        raw chunk is noisy.
+        """
+        prev = self._last_output_action
+        filtered = np.array(action, dtype=np.float32, copy=True)
+
         alpha = self._output_smoothing_alpha
-        if alpha is None or alpha >= 1.0:
-            self._last_output_action = np.array(action, dtype=np.float32, copy=True)
+        if alpha is not None and alpha < 1.0 and prev is not None and prev.shape == filtered.shape:
+            filtered = (alpha * filtered + (1.0 - alpha) * prev).astype(np.float32)
+
+        filtered = self._clip_action_step(filtered, prev)
+        filtered = self._clip_action_from_state(filtered)
+        self._last_output_action = np.array(filtered, dtype=np.float32, copy=True)
+        return filtered
+
+    def _clip_action_from_state(self, action: np.ndarray) -> np.ndarray:
+        state = self._last_state
+        if state is None or state.shape != action.shape:
             return action
-        if self._last_output_action is None or self._last_output_action.shape != action.shape:
-            self._last_output_action = np.array(action, dtype=np.float32, copy=True)
+        return self._clip_action_delta(
+            action,
+            state,
+            joint_limit=self._max_action_delta_from_state,
+            gripper_limit=self._max_gripper_delta_from_state,
+        )
+
+    def _clip_action_step(self, action: np.ndarray, prev: np.ndarray | None) -> np.ndarray:
+        if prev is None or prev.shape != action.shape:
             return action
-        smoothed = (alpha * action + (1.0 - alpha) * self._last_output_action).astype(np.float32)
-        self._last_output_action = smoothed.copy()
-        return smoothed
+        return self._clip_action_delta(
+            action,
+            prev,
+            joint_limit=self._max_joint_step_per_tick,
+            gripper_limit=self._max_gripper_step_per_tick,
+        )
+
+    @staticmethod
+    def _clip_action_delta(
+        action: np.ndarray,
+        reference: np.ndarray,
+        joint_limit: float | None,
+        gripper_limit: float | None,
+    ) -> np.ndarray:
+        if joint_limit is None and gripper_limit is None:
+            return action
+        out = np.array(action, dtype=np.float32, copy=True)
+        if joint_limit is not None:
+            arm_idx = [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12]
+            delta = np.clip(out[arm_idx] - reference[arm_idx], -joint_limit, joint_limit)
+            out[arm_idx] = reference[arm_idx] + delta
+        if gripper_limit is not None:
+            grip_idx = [6, 13]
+            delta = np.clip(out[grip_idx] - reference[grip_idx], -gripper_limit, gripper_limit)
+            out[grip_idx] = reference[grip_idx] + delta
+        return out.astype(np.float32)
 
     def __call__(self, obs: Dict[str, Any]) -> np.ndarray | None:
         model_input = self.obs_to_model_input(obs)
@@ -476,7 +558,31 @@ class AsyncMolmoAct2Agent(PolicyAgent):
         if self._clip_gripper:
             actions[:, 6] = np.clip(actions[:, 6], 0.0, 1.0)
             actions[:, 13] = np.clip(actions[:, 13], 0.0, 1.0)
+        self._maybe_report_action_stats(actions, obs)
         return actions
+
+    def _maybe_report_action_stats(self, actions: np.ndarray, obs: Dict[str, Any]) -> None:
+        if not self._debug_action_stats:
+            return
+        now = time.monotonic()
+        if now - self._last_action_stats_log_ts < 2.0:
+            return
+        self._last_action_stats_log_ts = now
+        state = np.asarray(obs.get("state"), dtype=np.float32).reshape(-1)
+        arm_idx = [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12]
+        grip_idx = [6, 13]
+        first_delta = actions[0] - state if state.shape == (14,) else actions[0] * 0.0
+        chunk_steps = np.diff(np.concatenate([state[None, :], actions], axis=0), axis=0) if state.shape == (14,) else np.diff(actions, axis=0)
+        arm_first_max = float(np.max(np.abs(first_delta[arm_idx])))
+        grip_first_max = float(np.max(np.abs(first_delta[grip_idx])))
+        arm_step_max = float(np.max(np.abs(chunk_steps[:, arm_idx]))) if chunk_steps.size else 0.0
+        grip_step_max = float(np.max(np.abs(chunk_steps[:, grip_idx]))) if chunk_steps.size else 0.0
+        print(
+            "[AsyncMolmoAct2Agent] raw action stats: "
+            f"shape={tuple(actions.shape)}, "
+            f"firstΔ arm={arm_first_max:.3f} rad grip={grip_first_max:.3f}, "
+            f"max step arm={arm_step_max:.3f} rad grip={grip_step_max:.3f}"
+        )
 
     def _step_sync(self, obs: Dict[str, Any]) -> np.ndarray:
         with self.action_lock:
