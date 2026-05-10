@@ -1,60 +1,45 @@
-# Architecture
+# Karma architecture
 
-## Node graph
+Karma launches a session from YAML. Each node runs in its own process and
+communicates over the in-process ZMQ bus through named topics.
 
-Every session is a graph of **nodes**, each running in its own subprocess with its own MCAP writer. All nodes communicate over a ZMQ XPUB/XSUB message bus. The bus runs in its own subprocess so its GIL pauses don't affect control latency.
-
-```
-                    ┌─────────────────────────┐
-                    │     MessageBus (ZMQ)    │
-                    │   XPUB/XSUB broker      │
-                    └────────────┬────────────┘
-                                 │
-          ┌──────────────────────┼─────────────────────┐
-          │                      │                     │
-   ┌──────▼──────┐       ┌───────▼──────┐      ┌───────▼──────┐
-   │  AgentNode  │       │  AgentNode   │      │  RobotNode   │
-   │ gello_left  │       │ gello_right  │      │  yam_left    │
-   │ (MCAP)      │       │ (MCAP)       │      │  (MCAP)      │
-   └─────────────┘       └──────────────┘      └──────────────┘
+```text
+leader_left ── leader_left/joint_pos ──▶ left
+leader_right ─ leader_right/joint_pos ─▶ right
+camera_* ───── camera_*/rgb ───────────▶ policy / visualizer nodes
 ```
 
-## Node types
+## Core runtime pieces
 
-**Agent nodes** — produce commands (`joint_pos`) from observations:
-- `AgentNode` wrapping `GelloLeaderAgent` — GELLO leader arm
-- `AgentNode` wrapping `FrankaPyrokiViserAgent` — browser IK gizmo for Franka
-- `AgentNode` wrapping `DiffusionPolicyAgent` / `AsyncPi0Agent` — learned policies
-- `AgentNode` wrapping `DummyAgent` — synthetic random targets for testing
+- `Session` starts/stops nodes, owns recording state, pause/resume, and the TUI.
+- `ProcessHost` isolates each node in a subprocess.
+- `Node` is the base class for agents, robots, cameras, sim, and visualizers.
+- `Publisher` / `Subscriber` move timestamped dictionaries on ZMQ topics.
+- Writers record node outputs as MCAP or MP4 under `recordings/`.
 
-**Environment nodes** — consume commands, produce observations:
-- `RobotNode` — any robot with `command_joint_pos()` / `get_observations()`
-- `CameraNode` — any camera with a `read() -> CameraData` driver
-- `XdofSimNode` — bimanual YAM MuJoCo simulation with live Viser viewer and optional Quest VR streaming
+## Standard nodes
 
-## Loop modes
+- `AgentNode` wraps teleop or policy agents and publishes joint commands.
+- `RobotNode` wraps YAM robot drivers and publishes `joint_state`.
+- `CameraNode` wraps ZED/OpenCV/RealSense camera drivers.
+- `XdofSimNode` runs the YAM MuJoCo sim, cameras, Viser, and optional VR stream.
+- `ViserMonitorNode` renders YAM URDF overlays, cameras, and policy chunks.
 
-`AgentNode` supports three loop modes:
+## Recordings
 
-| `loop_mode`         | Use case |
-|---------------------|----------|
-| `flat_out`          | Hardware leader arms — paced by serial/CAN I/O |
-| `fixed_rate`        | Viser IK solver — runs at a configured Hz |
-| `subscriber_driven` | Learned policies — triggered by new observations |
+A recording directory contains one MCAP per non-camera node, MP4/timestamp pairs
+for cameras, and `session_meta.json` with node wiring and sim metadata.
 
-## Recording format
+Typical files:
 
-Each node owns its writer. Recording is started and stopped via control signals to each subprocess. Output per episode:
-
+```text
+leader_left.mcap
+leader_right.mcap
+left.mcap
+right.mcap
+sim-left.mcap
+sim-right.mcap
+sim-sim_state.mcap
+sim-top-images-rgb.mp4
+session_meta.json
 ```
-recordings/20260321/episode_150034_abc123/
-  gello_left.mcap          # agent commands, per-arm
-  gello_right.mcap
-  yam_left.mcap            # robot joint states
-  yam_right.mcap
-  camera_top-images-rgb.mp4
-  camera_top-rgb-timestamp.npy
-  session_meta.json
-```
-
-MCAP files use JSON encoding. `session_meta.json` records node descriptors, sim config, and episode timing.
