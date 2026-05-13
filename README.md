@@ -8,7 +8,7 @@ YAM/GELLO-style leader arms, cameras, simulation, and policy agents.
 ## Install
 
 ```bash
-git clone --recurse-submodules https://github.com/uynitsuj/karma.git
+git clone --recurse-submodules https://github.com/SRA-VJTI/karma.git
 cd karma
 uv sync
 ```
