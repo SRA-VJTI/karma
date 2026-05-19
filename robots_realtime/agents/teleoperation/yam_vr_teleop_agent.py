@@ -57,6 +57,19 @@ def _rotate_quat(vr_wxyz: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _fit_sphere(points: np.ndarray) -> np.ndarray:
+    """Fit a sphere to N×3 points via linear least squares. Returns centre."""
+    # |p - c|^2 = r^2  →  2p·c - (|c|^2 - r^2) = |p|^2
+    A = np.column_stack([2.0 * points, np.ones(len(points))])
+    b = np.sum(points ** 2, axis=1)
+    x, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+    return x[:3]  # centre
+
+
+# ---------------------------------------------------------------------------
 # Agent
 # ---------------------------------------------------------------------------
 
@@ -94,11 +107,21 @@ class YamVRTeleopAgent(Agent):
         viser_port: int = 8080,
         vr_port: int = 8766,
         workspace_scale: float = 0.8,
+        ssl_certfile: Optional[str] = None,
+        ssl_keyfile: Optional[str] = None,
+        position_smoothing: float = 0.7,
+        dead_zone_m: float = 0.003,
+        speed_damping: float = 4.0,
     ) -> None:
         self.bimanual = bimanual
         self.right_arm_extrinsic = right_arm_extrinsic
         self.vr_port = vr_port
         self.workspace_scale = workspace_scale
+        self.ssl_certfile = ssl_certfile
+        self.ssl_keyfile = ssl_keyfile
+        self.position_smoothing = position_smoothing
+        self.dead_zone_m = dead_zone_m
+        self.speed_damping = speed_damping
 
         if bimanual:
             assert right_arm_extrinsic is not None, (
@@ -119,18 +142,32 @@ class YamVRTeleopAgent(Agent):
         )
         self._vis_thread.start()
 
-        # ── Calibration state ─────────────────────────────────────────────
-        # Populated when the user sends a "calibrate" message.
-        self._cal_vr_left: Optional[np.ndarray] = None    # [w,x,y,z, px,py,pz]
-        self._cal_vr_right: Optional[np.ndarray] = None
-        self._cal_ik_left: Optional[np.ndarray] = None    # IK handle [w,x,y,z, px,py,pz]
-        self._cal_ik_right: Optional[np.ndarray] = None
-        self._calibrated: bool = False
+        # ── Wrist pivot calibration ───────────────────────────────────────
+        # WebXR reports grip pose at the palm centre; the true wrist pivot is
+        # offset from that.  We find the offset by having the user twist their
+        # wrist in place for 5 s — the palm traces a sphere whose centre is
+        # the pivot.  Store the offset in controller frame (VR space).
+        self._wrist_offset: Dict[str, Optional[np.ndarray]] = {"left": None, "right": None}
+        self._cal_positions: Dict[str, list] = {"left": [], "right": []}
+        self._cal_active: Dict[str, bool] = {"left": False, "right": False}
 
-        # Grip-hold tracking for in-VR calibration gesture (both grips > 0.8 for 0.5 s)
-        self._grip_hold_start: Optional[float] = None
-        self._GRIP_CALIBRATE_THRESHOLD: float = 0.8
-        self._GRIP_CALIBRATE_DURATION: float = 0.5
+        # ── Input smoothing state ─────────────────────────────────────────
+        # EMA-smoothed VR position and orientation — kills hand-tremor jitter.
+        # Reset to None on each grip rising edge so re-grip always starts fresh.
+        self._smooth_pos: Dict[str, Optional[np.ndarray]] = {"left": None, "right": None}
+        self._smooth_wxyz: Dict[str, Optional[np.ndarray]] = {"left": None, "right": None}
+
+        # ── Adaptive scaling state ────────────────────────────────────────
+        self._speed_ema: Dict[str, float] = {"left": 0.0, "right": 0.0}
+        self._prev_vr_pos: Dict[str, Optional[np.ndarray]] = {"left": None, "right": None}
+
+        # ── Per-arm grip-to-activate state ────────────────────────────────
+        # Squeeze grip to start tracking that arm; release to freeze it.
+        # Each arm is independent — no global calibration step needed.
+        self._gripping: Dict[str, bool] = {"left": False, "right": False}
+        self._cal_vr: Dict[str, Optional[np.ndarray]] = {"left": None, "right": None}
+        self._cal_ik: Dict[str, Optional[np.ndarray]] = {"left": None, "right": None}
+        self._GRIP_THRESHOLD: float = 0.5
 
         # ── WebXR server ──────────────────────────────────────────────────
         self._app = self._build_fastapi()
@@ -147,7 +184,7 @@ class YamVRTeleopAgent(Agent):
         )
         self.urdf_vis_left_real = viser.extras.ViserUrdf(
             self.viser_server,
-            deepcopy(self.ik.urdf),
+            self.ik._load_fresh_urdf(),
             root_node_name="/base_left_real",
             mesh_color_override=(0.55, 0.75, 0.95),
         )
@@ -171,7 +208,7 @@ class YamVRTeleopAgent(Agent):
             self.base_frame_right_real.position = self.ik.base_frame_right.position
             self.urdf_vis_right_real = viser.extras.ViserUrdf(
                 self.viser_server,
-                deepcopy(self.ik.urdf),
+                self.ik._load_fresh_urdf(),
                 root_node_name="/base_left_real/base_right_real",
                 mesh_color_override=(0.55, 0.75, 0.95),
             )
@@ -243,107 +280,119 @@ class YamVRTeleopAgent(Agent):
             host="0.0.0.0",
             port=self.vr_port,
             log_level="warning",
+            ssl_certfile=self.ssl_certfile,
+            ssl_keyfile=self.ssl_keyfile,
         )
 
     # ── VR message handling ────────────────────────────────────────────────
 
     def _handle_vr_message(self, msg: dict) -> None:
         kind = msg.get("type")
-        if kind == "calibrate":
-            self._do_calibrate(msg)
-        elif kind == "poses":
-            self._check_grip_calibrate(msg)
-            if self._calibrated:
-                self._apply_vr_poses(msg)
-
-    def _check_grip_calibrate(self, msg: dict) -> None:
-        """Calibrate automatically when both grips are held for 0.5 s."""
-        left = msg.get("left") or {}
-        right = msg.get("right") or {}
-        both_gripped = (
-            float(left.get("grip", 0.0)) > self._GRIP_CALIBRATE_THRESHOLD
-            and float(right.get("grip", 0.0)) > self._GRIP_CALIBRATE_THRESHOLD
-        )
-        now = time.monotonic()
-        if both_gripped:
-            if self._grip_hold_start is None:
-                self._grip_hold_start = now
-            elif now - self._grip_hold_start >= self._GRIP_CALIBRATE_DURATION:
-                self._do_calibrate(msg)
-                self._grip_hold_start = None  # reset so it doesn't re-fire
-        else:
-            self._grip_hold_start = None
-
-    def _do_calibrate(self, msg: dict) -> None:
-        """Snapshot VR reference poses and current IK handle positions."""
-        left = msg.get("left")
-        right = msg.get("right")
-
-        if left:
-            self._cal_vr_left = np.array(
-                left["quat"] + left["pos"], dtype=np.float64
-            )
-            ctl = self.ik.transform_handles["left"].control
-            if ctl is not None:
-                self._cal_ik_left = np.concatenate(
-                    [np.array(ctl.wxyz), np.array(ctl.position)], dtype=np.float64
-                )
-
-        if right and self.bimanual:
-            self._cal_vr_right = np.array(
-                right["quat"] + right["pos"], dtype=np.float64
-            )
-            ctl = self.ik.transform_handles["right"].control
-            if ctl is not None:
-                self._cal_ik_right = np.concatenate(
-                    [np.array(ctl.wxyz), np.array(ctl.position)], dtype=np.float64
-                )
-
-        self._calibrated = (
-            self._cal_vr_left is not None
-            and self._cal_ik_left is not None
-            and (
-                not self.bimanual
-                or (
-                    self._cal_vr_right is not None
-                    and self._cal_ik_right is not None
-                )
-            )
-        )
-        self._vr_status.value = (
-            "Calibrated — tracking active" if self._calibrated else "Calibration incomplete"
-        )
+        if kind == "poses":
+            self._apply_vr_poses(msg)
+        elif kind == "wrist_cal_start":
+            side = msg.get("side")
+            if side in self._cal_positions:
+                self._cal_positions[side] = []
+                self._cal_active[side] = True
+                self._vr_status.value = f"Wrist cal {side}: twist for 5s…"
+        elif kind == "wrist_cal_end":
+            side = msg.get("side")
+            if side in self._cal_positions and self._cal_active[side]:
+                self._cal_active[side] = False
+                pts = np.array(self._cal_positions[side])
+                if len(pts) >= 10:
+                    pivot = _fit_sphere(pts)
+                    self._wrist_offset[side] = pivot - np.mean(pts, axis=0)
+                    self._vr_status.value = f"Wrist cal {side}: done (offset={self._wrist_offset[side].round(3)})"
+                else:
+                    self._vr_status.value = f"Wrist cal {side}: not enough data"
 
     def _apply_vr_poses(self, msg: dict) -> None:
-        """Convert incoming VR poses to IK targets and update gripper sliders."""
-        left = msg.get("left")
-        right = msg.get("right")
+        sides = ["left", "right"] if self.bimanual else ["left"]
+        for side in sides:
+            data = msg.get(side)
+            if not data:
+                continue
 
-        if left and self._cal_vr_left is not None and self._cal_ik_left is not None:
-            self._update_arm(
-                side="left",
-                vr_pos=np.array(left["pos"], dtype=np.float64),
-                vr_wxyz=np.array(left["quat"], dtype=np.float64),
-                grip=float(left.get("grip", 0.0)),
-                cal_vr=self._cal_vr_left,
-                cal_ik=self._cal_ik_left,
-                gripper_slider=self.left_gripper_slider,
+            raw_pos = np.array(data["pos"], dtype=np.float64)
+            vr_wxyz = np.array(data["quat"], dtype=np.float64)
+
+            # Collect positions during wrist calibration
+            if self._cal_active[side]:
+                self._cal_positions[side].append(raw_pos.tolist())
+
+            # Apply wrist pivot offset: shift from palm centre to true pivot
+            if self._wrist_offset[side] is not None:
+                R = vtf.SO3(vr_wxyz).as_matrix()
+                vr_pos = raw_pos + R @ self._wrist_offset[side]
+            else:
+                vr_pos = raw_pos
+
+            # EMA smoothing — damps high-frequency hand tremor.
+            # Always runs (even when disarmed) so re-arming never has stale state.
+            # position_smoothing: 0 = raw pass-through, ~0.9 = very smooth/laggy.
+            # Quaternion uses linear blend + renorm (NLERP) for orientation.
+            a = self.position_smoothing
+            if self._smooth_pos[side] is None:
+                self._smooth_pos[side] = vr_pos.copy()
+                self._smooth_wxyz[side] = vr_wxyz.copy()
+            else:
+                self._smooth_pos[side] = a * self._smooth_pos[side] + (1.0 - a) * vr_pos
+                q0, q1 = self._smooth_wxyz[side], vr_wxyz
+                if np.dot(q0, q1) < 0.0:  # shortest-path flip
+                    q1 = -q1
+                q = a * q0 + (1.0 - a) * q1
+                self._smooth_wxyz[side] = q / np.linalg.norm(q)
+            vr_pos = self._smooth_pos[side]
+            vr_wxyz = self._smooth_wxyz[side]
+
+            # Snapshot origin on first pose for this arm
+            if self._cal_vr[side] is None:
+                self._cal_vr[side] = np.concatenate([vr_wxyz, vr_pos])
+                ctl = self.ik.transform_handles[side].control
+                if ctl is not None:
+                    self._cal_ik[side] = np.concatenate(
+                        [np.array(ctl.wxyz), np.array(ctl.position)]
+                    ).astype(np.float64)
+
+            if self._cal_vr[side] is None or self._cal_ik[side] is None:
+                continue
+
+            # Only track while grip (middle finger) is held.
+            # Release to freeze arm in place; re-grip to resume from current position.
+            grip = float(data.get("grip", 0.0))
+            was_gripping = self._gripping[side]
+            now_gripping = grip > self._GRIP_THRESHOLD
+            if now_gripping and not was_gripping:
+                # Re-snapshot origin so re-gripping from a new hand position doesn't jump.
+                # Also reset smoothing state so the EMA starts clean at the new grip point.
+                self._smooth_pos[side] = vr_pos.copy()
+                self._smooth_wxyz[side] = vr_wxyz.copy()
+                self._prev_vr_pos[side] = None
+                self._speed_ema[side] = 0.0
+                self._cal_vr[side] = np.concatenate([vr_wxyz, vr_pos])
+                ctl = self.ik.transform_handles[side].control
+                if ctl is not None:
+                    self._cal_ik[side] = np.concatenate(
+                        [np.array(ctl.wxyz), np.array(ctl.position)]
+                    ).astype(np.float64)
+            self._gripping[side] = now_gripping
+            if not now_gripping:
+                continue
+
+            gripper_slider = (
+                self.left_gripper_slider if side == "left"
+                else self.right_gripper_slider  # type: ignore[attr-defined]
             )
-
-        if (
-            right
-            and self.bimanual
-            and self._cal_vr_right is not None
-            and self._cal_ik_right is not None
-        ):
             self._update_arm(
-                side="right",
-                vr_pos=np.array(right["pos"], dtype=np.float64),
-                vr_wxyz=np.array(right["quat"], dtype=np.float64),
-                grip=float(right.get("grip", 0.0)),
-                cal_vr=self._cal_vr_right,
-                cal_ik=self._cal_ik_right,
-                gripper_slider=self.right_gripper_slider,  # type: ignore[attr-defined]
+                side=side,
+                vr_pos=vr_pos,
+                vr_wxyz=vr_wxyz,
+                trigger=float(data.get("trigger", 0.0)),
+                cal_vr=self._cal_vr[side],
+                cal_ik=self._cal_ik[side],
+                gripper_slider=gripper_slider,
             )
 
     def _update_arm(
@@ -351,14 +400,28 @@ class YamVRTeleopAgent(Agent):
         side: str,
         vr_pos: np.ndarray,
         vr_wxyz: np.ndarray,
-        grip: float,
+        trigger: float,
         cal_vr: np.ndarray,
         cal_ik: np.ndarray,
         gripper_slider: Any,
     ) -> None:
-        # Position: delta in VR space → rotate to robot space → add to calibration IK target
-        delta_vr = vr_pos - cal_vr[4:]
-        new_pos = cal_ik[4:] + _rotate_pos(delta_vr) * self.workspace_scale
+        # Adaptive scaling: slow movements get full scale, fast movements are
+        # damped to prevent unsafe robot excursions.
+        if self._prev_vr_pos[side] is not None:
+            speed = float(np.linalg.norm(vr_pos - self._prev_vr_pos[side])) * 60.0  # m/s at ~60 Hz
+            self._speed_ema[side] = 0.85 * self._speed_ema[side] + 0.15 * speed
+        self._prev_vr_pos[side] = vr_pos.copy()
+        adaptive_scale = self.workspace_scale / (1.0 + self.speed_damping * self._speed_ema[side])
+
+        # Position: delta in VR space → rotate to robot space → add to calibration IK target.
+        # Smooth dead zone: linearly ramp from 0 at the threshold to full above it.
+        # Avoids the step discontinuity that a hard cutoff causes at the boundary.
+        delta_vr  = vr_pos - cal_vr[4:]
+        delta_norm = float(np.linalg.norm(delta_vr))
+        if delta_norm > 1e-9:
+            effective = max(0.0, delta_norm - self.dead_zone_m)
+            delta_vr  = delta_vr * (effective / delta_norm)
+        new_pos = cal_ik[4:] + _rotate_pos(delta_vr) * adaptive_scale
 
         # Orientation: rotate calibration delta into robot base frame
         cal_vr_rot = vtf.SO3(cal_vr[:4])
@@ -374,8 +437,8 @@ class YamVRTeleopAgent(Agent):
             ctl.position = tuple(new_pos)  # type: ignore[assignment]
             ctl.wxyz = tuple(new_wxyz)  # type: ignore[assignment]
 
-        # Grip (0–1) → gripper range (0–2.4 for YAM)
-        gripper_slider.value = grip * 2.4
+        # Trigger (0–1) → gripper range (0–2.4 for YAM)
+        gripper_slider.value = trigger * 2.4
 
     # ── Agent interface ────────────────────────────────────────────────────
 

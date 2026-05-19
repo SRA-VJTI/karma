@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from copy import deepcopy
 from typing import Literal, Optional
 
 import numpy as np
@@ -87,7 +86,7 @@ class FrankaPyroki(ViserAbstractBase):
             self.base_frame_right.position = (0.0, -0.61, 0.0)
             self.urdf_vis_right = viser.extras.ViserUrdf(
                 self.viser_server,
-                deepcopy(self.urdf),
+                self._load_fresh_urdf(),
                 root_node_name="/base/base_right",
             )
 

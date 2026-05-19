@@ -97,7 +97,7 @@ class FrankaPyrokiViserAgent(Agent):
         self.base_frame_left_real = self.viser_server.scene.add_frame("/franka_real", show_axes=False)
         self.urdf_vis_left_real = viser.extras.ViserUrdf(
             self.viser_server,
-            deepcopy(self.ik.urdf),
+            self.ik._load_fresh_urdf(),
             root_node_name="/franka_real",
             mesh_color_override=(0.55, 0.75, 0.95),
         )
@@ -112,7 +112,7 @@ class FrankaPyrokiViserAgent(Agent):
             self.base_frame_right_real.position = self.ik.base_frame_right.position
             self.urdf_vis_right_real = viser.extras.ViserUrdf(
                 self.viser_server,
-                deepcopy(self.ik.urdf),
+                self.ik._load_fresh_urdf(),
                 root_node_name="/franka_real/right",
                 mesh_color_override=(0.55, 0.75, 0.95),
             )
