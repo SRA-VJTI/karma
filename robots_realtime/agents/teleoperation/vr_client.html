@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YAM VR Teleop</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0d1117;
+      color: #e6edf3;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 24px 16px;
+    }
+    h1 { font-size: 1.5rem; margin-bottom: 4px; color: #58a6ff; }
+    .subtitle { color: #8b949e; font-size: 0.9rem; margin-bottom: 24px; }
+    .card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      padding: 20px;
+      width: 100%;
+      max-width: 480px;
+      margin-bottom: 16px;
+    }
+    .card h2 { font-size: 1rem; margin-bottom: 12px; color: #79c0ff; }
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: #484f58;
+      flex-shrink: 0;
+    }
+    .dot.green  { background: #3fb950; box-shadow: 0 0 6px #3fb950; }
+    .dot.yellow { background: #d29922; box-shadow: 0 0 6px #d29922; }
+    .dot.red    { background: #f85149; box-shadow: 0 0 6px #f85149; }
+    .label { font-size: 0.85rem; color: #8b949e; }
+    button {
+      width: 100%;
+      padding: 12px;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+      font-size: 1rem;
+      font-weight: 600;
+      transition: opacity 0.15s;
+      margin-bottom: 10px;
+    }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    #btnEnterVR   { background: #238636; color: #fff; }
+    #btnCalibrate { background: #1f6feb; color: #fff; }
+    #btnExitVR    { background: #b62324; color: #fff; display: none; }
+    .instructions {
+      font-size: 0.8rem;
+      color: #8b949e;
+      line-height: 1.6;
+    }
+    .instructions li { margin-left: 18px; margin-bottom: 4px; }
+    .pose-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 8px;
+    }
+    .pose-box { background: #0d1117; border-radius: 8px; padding: 10px; }
+    .pose-box h3 { font-size: 0.8rem; color: #79c0ff; margin-bottom: 6px; }
+    .pose-val { font-size: 0.72rem; color: #8b949e; font-family: monospace; }
+    #wsUrl { width: 100%; padding: 8px; background: #0d1117; border: 1px solid #30363d;
+             border-radius: 6px; color: #e6edf3; font-family: monospace; font-size: 0.82rem; }
+  </style>
+</head>
+<body>
+  <h1>YAM VR Teleop</h1>
+  <p class="subtitle">Meta Quest WebXR controller interface</p>
+
+  <div class="card">
+    <h2>Connection</h2>
+    <div class="status-row">
+      <div class="dot" id="dotWS"></div>
+      <span class="label" id="lblWS">WebSocket: disconnected</span>
+    </div>
+    <div class="status-row">
+      <div class="dot" id="dotXR"></div>
+      <span class="label" id="lblXR">WebXR: not in session</span>
+    </div>
+    <label style="font-size:0.8rem;color:#8b949e;display:block;margin-bottom:6px;">
+      Server WebSocket URL
+    </label>
+    <input id="wsUrl" type="text" />
+  </div>
+
+  <div class="card">
+    <h2>Controls</h2>
+    <button id="btnEnterVR"   disabled>Enter VR</button>
+    <button id="btnCalibrate" disabled>Calibrate (set reference pose)</button>
+    <button id="btnExitVR">Exit VR</button>
+  </div>
+
+  <div class="card">
+    <h2>Live controller data</h2>
+    <div class="pose-grid">
+      <div class="pose-box">
+        <h3>Left controller</h3>
+        <div class="pose-val" id="leftPose">—</div>
+      </div>
+      <div class="pose-box">
+        <h3>Right controller</h3>
+        <div class="pose-val" id="rightPose">—</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Instructions</h2>
+    <ol class="instructions">
+      <li>Open this page on your Quest browser (HTTP, developer mode required).</li>
+      <li>Connect automatically — the page reconnects every 2 s if the socket drops.</li>
+      <li>Press <strong>Enter VR</strong>, then hold your controllers in a comfortable
+          resting pose and press <strong>Calibrate</strong> (or hold both grip buttons
+          for 0.5 s inside VR).</li>
+      <li>Move your hands — the robot arms track your controllers in relative mode.</li>
+      <li>Squeeze the <strong>grip</strong> button to close the gripper.</li>
+      <li>Re-calibrate any time you want to reset the reference frame.</li>
+    </ol>
+  </div>
+
+  <script>
+    // ── Configuration ────────────────────────────────────────────────────────
+    const DEFAULT_WS_PORT = 8766;
+    const SEND_HZ = 60;           // controller pose send rate
+    const RECONNECT_MS = 2000;    // WebSocket reconnect interval
+
+    // ── State ────────────────────────────────────────────────────────────────
+    let ws = null;
+    let xrSession = null;
+    let xrRefSpace = null;
+    let rafId = null;
+    let lastSendTime = 0;
+
+    // ── UI elements ──────────────────────────────────────────────────────────
+    const dotWS   = document.getElementById('dotWS');
+    const lblWS   = document.getElementById('lblWS');
+    const dotXR   = document.getElementById('dotXR');
+    const lblXR   = document.getElementById('lblXR');
+    const btnEnterVR   = document.getElementById('btnEnterVR');
+    const btnCalibrate = document.getElementById('btnCalibrate');
+    const btnExitVR    = document.getElementById('btnExitVR');
+    const wsUrlInput   = document.getElementById('wsUrl');
+    const leftPoseEl   = document.getElementById('leftPose');
+    const rightPoseEl  = document.getElementById('rightPose');
+
+    // Derive default WS URL from page origin
+    wsUrlInput.value = `ws://${window.location.hostname}:${DEFAULT_WS_PORT}/ws`;
+
+    // ── WebSocket ────────────────────────────────────────────────────────────
+    function connectWS() {
+      if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
+      const url = wsUrlInput.value.trim();
+      try {
+        ws = new WebSocket(url);
+      } catch (e) {
+        scheduleReconnect();
+        return;
+      }
+
+      ws.onopen = () => {
+        setWSDot('green', `Connected to ${url}`);
+        btnEnterVR.disabled = false;
+        if (xrSession) btnCalibrate.disabled = false;
+      };
+      ws.onclose = () => {
+        setWSDot('red', 'Disconnected — retrying…');
+        btnEnterVR.disabled = true;
+        btnCalibrate.disabled = true;
+        scheduleReconnect();
+      };
+      ws.onerror = () => {
+        setWSDot('red', 'Connection error');
+      };
+    }
+
+    function scheduleReconnect() {
+      setTimeout(connectWS, RECONNECT_MS);
+    }
+
+    function sendMsg(obj) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(obj));
+      }
+    }
+
+    function setWSDot(color, text) {
+      dotWS.className = `dot ${color}`;
+      lblWS.textContent = `WebSocket: ${text}`;
+    }
+
+    // ── WebXR ────────────────────────────────────────────────────────────────
+    async function enterVR() {
+      if (!navigator.xr) {
+        lblXR.textContent = 'WebXR not supported in this browser';
+        dotXR.className = 'dot red';
+        return;
+      }
+      const supported = await navigator.xr.isSessionSupported('immersive-vr');
+      if (!supported) {
+        lblXR.textContent = 'immersive-vr not supported';
+        dotXR.className = 'dot red';
+        return;
+      }
+      try {
+        xrSession = await navigator.xr.requestSession('immersive-vr', {
+          optionalFeatures: ['local-floor', 'bounded-floor'],
+        });
+      } catch (e) {
+        lblXR.textContent = `Session request failed: ${e.message}`;
+        dotXR.className = 'dot red';
+        return;
+      }
+
+      xrSession.addEventListener('end', onXRSessionEnd);
+      xrRefSpace = await xrSession.requestReferenceSpace('local-floor').catch(
+        () => xrSession.requestReferenceSpace('local')
+      );
+
+      dotXR.className = 'dot green';
+      lblXR.textContent = 'XR session active';
+      btnEnterVR.style.display = 'none';
+      btnExitVR.style.display = '';
+      btnCalibrate.disabled = false;
+
+      rafId = xrSession.requestAnimationFrame(onXRFrame);
+    }
+
+    function onXRSessionEnd() {
+      xrSession = null;
+      xrRefSpace = null;
+      rafId = null;
+      dotXR.className = 'dot';
+      lblXR.textContent = 'Session ended';
+      btnEnterVR.style.display = '';
+      btnExitVR.style.display = 'none';
+      btnCalibrate.disabled = true;
+    }
+
+    function onXRFrame(time, frame) {
+      if (!xrSession) return;
+      rafId = xrSession.requestAnimationFrame(onXRFrame);
+
+      const controllerData = getControllerData(frame);
+      updateUI(controllerData);
+
+      // Throttle send rate
+      if (time - lastSendTime < 1000 / SEND_HZ) return;
+      lastSendTime = time;
+
+      // In-VR calibration gesture: both grips > 0.8 for 0.5 s handled server-side
+      sendMsg({ type: 'poses', ...controllerData });
+    }
+
+    function getControllerData(frame) {
+      const result = {};
+      for (const src of xrSession.inputSources) {
+        if (!src.gripSpace) continue;
+        const pose = frame.getPose(src.gripSpace, xrRefSpace);
+        if (!pose) continue;
+
+        const t = pose.transform;
+        const pos = [t.position.x, t.position.y, t.position.z];
+        const quat = [
+          t.orientation.w,
+          t.orientation.x,
+          t.orientation.y,
+          t.orientation.z,
+        ];
+
+        let grip = 0, trigger = 0;
+        if (src.gamepad) {
+          // button[0] = trigger, button[1] = grip (standard WebXR gamepad layout)
+          trigger = src.gamepad.buttons[0]?.value ?? 0;
+          grip    = src.gamepad.buttons[1]?.value ?? 0;
+        }
+
+        const hand = src.handedness; // 'left' or 'right'
+        result[hand] = { pos, quat, grip, trigger };
+      }
+      return result;
+    }
+
+    function updateUI(data) {
+      const fmt = (v) => v.map(x => x.toFixed(3)).join(', ');
+      if (data.left) {
+        leftPoseEl.innerHTML =
+          `pos: [${fmt(data.left.pos)}]<br>` +
+          `grip: ${data.left.grip.toFixed(2)}  trig: ${data.left.trigger.toFixed(2)}`;
+      }
+      if (data.right) {
+        rightPoseEl.innerHTML =
+          `pos: [${fmt(data.right.pos)}]<br>` +
+          `grip: ${data.right.grip.toFixed(2)}  trig: ${data.right.trigger.toFixed(2)}`;
+      }
+    }
+
+    // ── Calibrate (manual button) ────────────────────────────────────────────
+    function sendCalibrate() {
+      if (!xrSession || !xrRefSpace) {
+        alert('Enter VR first, then calibrate.');
+        return;
+      }
+      // requestAnimationFrame to get a fresh frame for calibration
+      xrSession.requestAnimationFrame((time, frame) => {
+        const data = getControllerData(frame);
+        sendMsg({ type: 'calibrate', ...data });
+        // Continue the render loop
+        rafId = xrSession.requestAnimationFrame(onXRFrame);
+      });
+    }
+
+    // ── Button wiring ────────────────────────────────────────────────────────
+    btnEnterVR.addEventListener('click', enterVR);
+    btnExitVR.addEventListener('click', () => xrSession && xrSession.end());
+    btnCalibrate.addEventListener('click', sendCalibrate);
+    wsUrlInput.addEventListener('change', () => {
+      if (ws) ws.close();
+      connectWS();
+    });
+
+    // ── Boot ─────────────────────────────────────────────────────────────────
+    connectWS();
+
+    // Check WebXR availability early to show Enter VR button state
+    if (navigator.xr) {
+      navigator.xr.isSessionSupported('immersive-vr').then(ok => {
+        if (!ok) {
+          lblXR.textContent = 'immersive-vr not available on this device';
+          dotXR.className = 'dot yellow';
+        } else {
+          lblXR.textContent = 'immersive-vr supported';
+          dotXR.className = 'dot green';
+        }
+      });
+    } else {
+      lblXR.textContent = 'WebXR not supported — use Quest browser or Chrome with VR headset';
+      dotXR.className = 'dot red';
+    }
+  </script>
+</body>
+</html>

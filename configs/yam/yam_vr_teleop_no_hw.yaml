@@ -1,0 +1,23 @@
+version: "1"
+
+# No-hardware VR teleop — runs the Viser IK viewer + WebXR server only.
+# No robot or camera nodes needed.  Use to test VR calibration + IK before
+# connecting real hardware.
+
+session:
+  save_root: recordings
+
+nodes:
+  - type: AgentNode
+    name: yam_vr
+    agent_class: robots_realtime.agents.teleoperation.yam_vr_teleop_agent:YamVRTeleopAgent
+    agent_kwargs:
+      bimanual: true
+      viser_port: 8080
+      vr_port: 8766
+      workspace_scale: 0.8
+      right_arm_extrinsic:
+        position: [0.0, -0.61, 0.0]
+        rotation: [1.0, 0.0, 0.0, 0.0]
+    loop_mode: fixed_rate
+    poll_freq: 100.0

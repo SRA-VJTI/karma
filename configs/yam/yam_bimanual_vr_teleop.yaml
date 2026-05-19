@@ -1,0 +1,82 @@
+version: "1"
+
+# YAM bimanual VR teleoperation with Meta Quest controllers.
+#
+# Prerequisites:
+#   1. Enable Developer Mode on your Meta Quest headset.
+#   2. Connect the Quest to the same LAN as this machine.
+#   3. Open the Quest browser and navigate to:
+#        http://<THIS_MACHINE_IP>:8766
+#   4. Press "Enter VR", then calibrate (see page instructions).
+#
+# Ports:
+#   viser_port: 8080  — open in desktop browser to see the 3-D robot viewer
+#   vr_port:    8766  — served to the Quest browser
+
+session:
+  save_root: recordings
+  record_topic: yam_vr/record
+
+nodes:
+  # Single agent node manages both arms; publishes yam_vr/left_pos and yam_vr/right_pos.
+  - type: AgentNode
+    name: yam_vr
+    agent_class: robots_realtime.agents.teleoperation.yam_vr_teleop_agent:YamVRTeleopAgent
+    agent_kwargs:
+      bimanual: true
+      viser_port: 8080
+      vr_port: 8766
+      workspace_scale: 0.8   # reduce if robot arms overshoot
+      right_arm_extrinsic:
+        position: [0.0, -0.61, 0.0]
+        rotation: [1.0, 0.0, 0.0, 0.0]  # wxyz identity
+    loop_mode: fixed_rate
+    poll_freq: 100.0
+    state_topics:
+      left:  yam_left/joint_state
+      right: yam_right/joint_state
+    image_topics:
+      top:   camera_top/rgb
+      left:  camera_left/rgb
+      right: camera_right/rgb
+
+  - type: RobotNode
+    name: yam_left
+    robot_config: robot_configs/yam/left.yaml
+    cmd_topic: yam_vr/left_pos   # AgentNode publishes {name}/{arm}_pos for multi-arm
+    poll_freq: 200
+    startup_joint_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    startup_duration_s: 2.0
+    shutdown_joint_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    shutdown_duration_s: 2.0
+
+  - type: RobotNode
+    name: yam_right
+    robot_config: robot_configs/yam/right.yaml
+    cmd_topic: yam_vr/right_pos  # AgentNode publishes {name}/{arm}_pos for multi-arm
+    poll_freq: 200
+    startup_joint_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    startup_duration_s: 2.0
+    shutdown_joint_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    shutdown_duration_s: 2.0
+
+  - type: CameraNode
+    name: camera_top
+    driver: ZedCamera
+    device_id: "YOUR_SERIAL"
+    resolution: HD720
+    fps: 30
+
+  - type: CameraNode
+    name: camera_left
+    driver: ZedCamera
+    device_id: "YOUR_SERIAL"
+    resolution: HD720
+    fps: 30
+
+  - type: CameraNode
+    name: camera_right
+    driver: ZedCamera
+    device_id: "YOUR_SERIAL"
+    resolution: HD720
+    fps: 30
