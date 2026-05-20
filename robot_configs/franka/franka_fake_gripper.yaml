@@ -1,8 +1,0 @@
-_target_: robots_realtime.robots.robot.ConcatenatedRobot
-robots:
-  - _target_: robots_realtime.robots.franka_osc.FrankaPanda
-    host_name: "172.16.0.1"
-  # mock a fake gripper
-  - _target_: robots_realtime.robots.robot.PrintRobot
-    num_dofs: 1
-    dont_print: true

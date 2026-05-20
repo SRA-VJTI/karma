@@ -47,4 +47,4 @@ ip -brief link show | grep can
 
 echo ""
 echo "You can now run:"
-echo "  python -m robots_realtime.main configs/yam/yam_bimanual_yam_leader.yaml"
+echo "  uv run krm session configs/bimanual_yam_leader.yaml"

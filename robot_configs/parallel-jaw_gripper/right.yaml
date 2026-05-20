@@ -1,0 +1,4 @@
+motor_chain:
+  channel: "can_right"
+  motor_chain_name: "right"
+gripper_limits: [0.0, -5.2]

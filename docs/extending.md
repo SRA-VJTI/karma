@@ -1,75 +1,60 @@
-# Extending robots_realtime
+# Extending Karma
 
-## Adding a new agent
+Karma extension points are plain Python classes referenced from YAML with
+`module.path:ClassName` strings.
 
-Implement the `Agent` protocol — just `act(obs: dict) -> dict`:
+## Add an agent
+
+Implement `act(obs) -> dict` and optionally `reset()` / `close()`.
 
 ```python
-# robots_realtime/agents/my_agent.py
-class MyAgent:
-    def reset(self) -> None: ...
-    def act(self, obs: dict) -> dict:
-        # obs contains whatever state_topics / image_topics you subscribed to
-        return {"pos": joint_positions}          # single arm
-        # or {"left": {"pos": ...}, "right": {"pos": ...}}  # multi-arm
+# karma/agents/my_agent.py
+from karma.agents.agent import Agent
+
+
+class MyAgent(Agent):
+    def act(self, obs):
+        return {"left": {"pos": obs["left"]["joint_pos"]}}
 ```
 
-Reference it in YAML — no node code needed:
+Wire it into a session:
 
 ```yaml
 - type: AgentNode
-  name: my_agent
-  agent_class: robots_realtime.agents.my_agent:MyAgent
-  agent_kwargs:
-    checkpoint: /path/to/weights.pt
-  loop_mode: subscriber_driven
+  name: my_policy
+  agent_class: karma.agents.my_agent:MyAgent
   state_topics:
-    left: yam_left/joint_state
-    right: yam_right/joint_state
-  image_topics:
-    top: camera_top/rgb
+    left: left/joint_state
+    right: right/joint_state
+  loop_mode: fixed_rate
+  poll_freq: 30
 ```
 
-## Adding a new robot
+`AgentNode` publishes `joint_pos` for single-arm agents or `{arm}_pos` for
+multi-arm dictionaries.
 
-Implement two methods:
+## Add a camera driver
 
-```python
-class MyRobot:
-    def command_joint_pos(self, joint_pos: np.ndarray) -> None: ...
-    def get_observations(self) -> dict: ...  # must contain "joint_pos"
-```
+Implement the `CameraDriver` interface from
+`karma.sensors.cameras.camera`. Then register it in
+`karma.runtime.environment.camera_node` or pass a fully qualified class path.
 
-## Adding a new camera
+## Add a session config
 
-Implement `read() -> CameraData` from `robots_realtime.sensors.cameras.camera`.
-
-## Session config reference
+Prefer the standard names:
 
 ```yaml
-version: "1"
-
 session:
   save_root: recordings
-  record_topic: gello_left/record   # bus topic that triggers record start/stop
-  auto_record_duration: 10.0        # auto-record for N seconds then exit
+  record_topic: leader_left/record
 
 nodes:
   - type: AgentNode
-    name: gello_left
-    agent_class: robots_realtime.agents.teleoperation.gello_leader_agent:GelloLeaderAgent
-    agent_kwargs:
-      port: /dev/ttyUSB0
-      robot_name: left
-    arm_key: left
-    loop_mode: flat_out
+    name: leader_left
+    agent_class: karma.agents.teleoperation.gello_leader_agent:GelloLeaderAgent
 
   - type: RobotNode
-    name: yam_left
-    robot_config: robot_configs/yam/left.yaml
-    cmd_topic: gello_left/joint_pos
-
-  - type: CameraNode
-    name: camera_top
-    fps: 30
+    name: left
+    robot_config: robot_configs/left.yaml
+    cmd_topic: leader_left/joint_pos
 ```
