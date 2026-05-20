@@ -32,15 +32,19 @@ Wire protocol (matches ``robometer_policy_learning/envs/karma_yam_remote_env.py`
                      "right_camera-images-rgb": uint8 (3,H,W),
                      "state":                   float32 (14,),
                      "prompt":                  str,
-                     # STEP only:
-                     "done":                    bool (optional, default False),
-                     "truncated":               bool (optional, default False),
+                     # STEP only (GT-reward path):
+                     "reward":                  float   (per-step reward),
+                     "success":                 bool    (task judged complete),
+                     "done":                    bool    (terminate now;
+                                                         defaults to success),
+                     "truncated":               bool    (time-limit / fault),
                      "info":                    dict (optional),
                  })
 
-The trainer never reads ``done`` from this daemon for normal episodes —
-episode termination is decided by the Robometer voting window upstream. Set
-``done=True`` here only for unrecoverable hardware faults.
+GT-reward path (v1): every STEP response carries ``reward`` + ``success``
+populated by :func:`get_gt_reward`. SAC trains on these directly — no
+Robometer in the loop. Default ``get_gt_reward`` is operator-press-Y/N
+at episode end (sparse +1 on success).
 """
 
 from __future__ import annotations
@@ -124,14 +128,77 @@ def execute_chunk(chunk: np.ndarray) -> Dict[str, Any]:
     ``async_molmoact2_agent.py`` pushes through the bus — slice it into
     per-tick joint setpoints at 10 Hz (or the rate Karma is configured for).
 
-    Returns an info dict — may be empty. The trainer never reads its env
-    reward (Robometer relabels asynchronously); ``done`` defaults to False
-    unless a hardware fault is detected.
+    Returns an optional info dict (free-form). The numeric reward + success
+    decision is produced separately by :func:`get_gt_reward` (see below).
+    Return ``{"hw_fault": True}`` here only if a hardware fault aborts the
+    chunk; the daemon will surface it as ``truncated=True`` to the trainer.
     """
     # TODO: e.g. for i in range(chunk.shape[0]):
     #            karma_session.send_action(chunk[i])
     #            karma_session.wait_one_tick()
     raise NotImplementedError("wire up execute_chunk() against your Karma session")
+
+
+# Max env-steps per episode before forced truncation. Adjust to your task.
+MAX_STEPS_PER_EPISODE = 6   # 6 chunks * 10 ticks @ 10 Hz = 6s per episode
+
+
+def get_gt_reward(
+    *,
+    obs_after: Dict[str, Any],
+    chunk: np.ndarray,
+    last_info: Dict[str, Any],
+    step_idx: int,
+) -> Dict[str, Any]:
+    """Compute per-step reward + success for the GT-reward (no-Robometer) path.
+
+    Called once per :func:`execute_chunk`. Receives the obs captured *after*
+    the chunk ran, the chunk itself, any info the executor returned, and the
+    zero-indexed step counter inside the current episode. Return a dict with:
+
+      * ``reward``  float   — per-step scalar (use sparse +1 on success and
+                              0 otherwise unless you have shaped reward).
+      * ``success`` bool    — True when the task is judged complete.
+      * ``done``    bool    — terminate this episode (defaults to ``success``).
+
+    **Default implementation: operator-supplied sparse reward.** At the end of
+    every episode (step ``MAX_STEPS_PER_EPISODE - 1`` or earlier on hardware
+    fault) the daemon blocks on stdin and asks ``success? [y/N]``. y → +1
+    reward, episode ends, success. n / Enter → 0, episode ends, no success.
+    All intermediate steps return 0.
+
+    Swap this for a scripted geometry check, a wrist-camera success
+    classifier, a tray-contact sensor, or anything else that yields a scalar
+    per step. The trainer doesn't care what's inside, only that the numbers
+    are consistent across episodes.
+    """
+    # Hardware-fault short-circuit: the executor signaled a fault on this
+    # chunk, so end the episode with a small negative reward.
+    if last_info.get("hw_fault"):
+        return {"reward": -1.0, "success": False, "done": True}
+
+    is_last_step = step_idx >= MAX_STEPS_PER_EPISODE - 1
+    if not is_last_step:
+        # Intermediate step — give 0 reward, keep going. Replace this branch
+        # if you want dense shaping.
+        return {"reward": 0.0, "success": False, "done": False}
+
+    # End-of-episode: ask the operator. Falls back to "no success" if the
+    # daemon is running without a TTY.
+    print(
+        "\n[dsrl_bridge] episode complete — was the task successful?  [y/N] ",
+        end="",
+        flush=True,
+    )
+    answer = ""
+    try:
+        answer = input().strip().lower()
+    except EOFError:
+        answer = ""
+    success = answer in ("y", "yes")
+    reward = 1.0 if success else 0.0
+    print(f"[dsrl_bridge] -> success={success} reward={reward}")
+    return {"reward": reward, "success": success, "done": True}
 
 
 # -- wire helpers (mirror env wrapper exactly) -------------------------------
@@ -186,6 +253,9 @@ class DSRLBridgeHandler(socketserver.BaseRequestHandler):
     def setup(self) -> None:
         peer = self.client_address
         log.info("trainer connected from %s", peer)
+        # Episode-local step counter so get_gt_reward() knows when to ask
+        # the operator. Reset to 0 on every RESET message.
+        self._step_idx = 0
 
     def finish(self) -> None:
         log.info("trainer disconnected from %s", self.client_address)
@@ -205,6 +275,7 @@ class DSRLBridgeHandler(socketserver.BaseRequestHandler):
                 if msg.get("type") == "RESET":
                     task = msg.get("task") or ""
                     log.info("RESET (task=%r)", task)
+                    self._step_idx = 0
                     home_robot()
                     prompt_operator_reset(task or "<no task>")
                     obs = capture_observation()
@@ -217,14 +288,27 @@ class DSRLBridgeHandler(socketserver.BaseRequestHandler):
                         raise ValueError(
                             f"STEP chunk must be (T, 14), got {chunk.shape}"
                         )
-                    info = execute_chunk(chunk) or {}
+                    exec_info = execute_chunk(chunk) or {}
                     obs = capture_observation()
                     _validate_obs(obs)
+                    reward_info = get_gt_reward(
+                        obs_after=obs,
+                        chunk=chunk,
+                        last_info=exec_info,
+                        step_idx=self._step_idx,
+                    )
                     response: Dict[str, Any] = dict(obs)
-                    response["info"] = info
-                    response.setdefault("done", False)
-                    response.setdefault("truncated", False)
+                    response["info"] = exec_info
+                    response["reward"] = float(reward_info.get("reward", 0.0))
+                    response["success"] = bool(reward_info.get("success", False))
+                    response["done"] = bool(reward_info.get("done", response["success"]))
+                    response["truncated"] = bool(exec_info.get("hw_fault", False))
                     _send_msg(sock, response)
+                    # Bookkeeping for the next step or fresh episode.
+                    if response["done"] or response["truncated"]:
+                        self._step_idx = 0
+                    else:
+                        self._step_idx += 1
                 else:
                     _send_msg(sock, {"error": f"unknown message type: {msg.get('type')!r}"})
             except NotImplementedError as exc:
@@ -248,8 +332,9 @@ def serve(host: str, port: int) -> None:
     )
     log.info("DSRL bridge listening on %s:%d", host, port)
     log.info(
-        "(scaffold mode — the four hooks at the top of this file need to be "
-        "wired into your Karma session before training will work)"
+        "(scaffold mode — the four Karma hooks at the top of this file need "
+        "to be wired into your session before training will work. "
+        "get_gt_reward defaults to operator-press-Y/N at episode end.)"
     )
     with _ReusingTCPServer((host, port), DSRLBridgeHandler) as srv:
         srv.serve_forever()
