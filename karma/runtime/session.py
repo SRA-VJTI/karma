@@ -342,6 +342,24 @@ class Session:
         else:
             self.pause()
 
+    def go_home(self) -> None:
+        """Save any active recording, pause, then drive every robot to its
+        configured home pose in parallel. Stays paused on return so the
+        operator can re-stage the leader before pressing [space] to resume —
+        the RobotNode handoff ramp then smoothly blends home → leader.
+        """
+        if self._is_recording:
+            self.end_episode(save=True)
+        self.pause()
+        threads = [
+            threading.Thread(target=host.go_home, daemon=True)
+            for host in self._hosts
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=35.0)
+
     def push_event(self, msg: str) -> None:
         self._events.appendleft((time.time(), msg))
 

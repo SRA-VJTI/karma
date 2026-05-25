@@ -2,7 +2,6 @@
 Bimanual YAM arms Inverse Kinematics Example using PyRoki with ViserAbstractBase.
 """
 
-from copy import deepcopy
 from typing import Literal, Optional
 
 import numpy as np
@@ -11,7 +10,7 @@ import viser
 import viser.extras
 import viser.transforms as vtf
 
-from karma.robots.inverse_kinematics.pyroki_snippets._solve_ik import solve_ik
+from karma.robots.inverse_kinematics.pyroki_snippets._solve_ik_decoupled import solve_ik_decoupled
 from karma.robots.viser.viser_base import TransformHandle, ViserAbstractBase
 
 
@@ -46,7 +45,7 @@ class YamPyroki(ViserAbstractBase):
             self.base_frame_right = self.viser_server.scene.add_frame("/base/base_right", show_axes=False)
             self.base_frame_right.position = (0.0, -0.61, 0.0)
             self.urdf_vis_right = viser.extras.ViserUrdf(
-                self.viser_server, deepcopy(self.urdf), root_node_name="/base/base_right"
+                self.viser_server, self._load_fresh_urdf(), root_node_name="/base/base_right"
             )
 
     def _setup_solver_specific(self):
@@ -132,11 +131,12 @@ class YamPyroki(ViserAbstractBase):
             target_positions.append(target_tf.translation())
             target_wxyzs.append(target_tf.rotation().wxyz)
 
-            solution = solve_ik(
+            solution = solve_ik_decoupled(
                 robot=self.robot,
                 target_link_name=self.target_link_names[idx],
                 target_position=target_tf.translation(),
                 target_wxyz=target_tf.rotation().wxyz,
+                prev_joints=self.joints[side],  # warm-start from previous solution
             )
             self.joints[side] = solution
 

@@ -1,18 +1,27 @@
 version: "1"
 
 session:
-  save_root: recordings
-  record_topic: leader_left/record
+  save_root: recordings/stack_cube
+  # Start paused so you can move into the start pose, then [space] in the TUI
+  # both engages the followers and starts recording. No record button needed.
+  start_paused: true
+  record_on_unpause: true
 
 nodes:
   - type: AgentNode
     name: leader_left
     agent_class: karma.agents.teleoperation.gello_leader_agent:GelloLeaderAgent
     agent_kwargs:
+      # NOTE: /dev/ttyACM* numbers can be reassigned across reboots / replugs.
+      # Current mapping (left plugged first, then right): ACM0=left, ACM1=right.
+      # If a session brings up the wrong arm, swap these two ports.
       port: /dev/ttyACM0
       robot_name: left
       include_gripper: true
       joint_signs: [-1, -1, -1, -1, -1, -1]
+      dither: false
+      pos_deadband_deg: 0.3
+      gripper_deadband: 0.01
     arm_key: left
     loop_mode: flat_out
 
@@ -24,6 +33,9 @@ nodes:
       robot_name: right
       include_gripper: true
       joint_signs: [-1, -1, -1, -1, -1, -1]
+      dither: false
+      pos_deadband_deg: 0.3
+      gripper_deadband: 0.01
     arm_key: right
     loop_mode: flat_out
 
@@ -47,23 +59,29 @@ nodes:
     shutdown_joint_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     shutdown_duration_s: 2.0
 
+  # Cameras: same RealSense rig + naming as configs/yam/yam_bimanual_molmoact2_policy.yaml
+  # so demos recorded here match the deploy-time inputs exactly (no Zed/RealSense
+  # sim2real-style mismatch at eval).
+  #   top/scene = 352122273221
+  #   left      = 409122274921
+  #   right     = 352122271723
   - type: CameraNode
     name: camera_top
-    driver: ZedCamera
-    device_id: "YOUR_SERIAL"
-    resolution: HD720
+    driver: RealSenseCamera
+    device_id: "352122273221"
+    resolution: VGA
     fps: 30
 
   - type: CameraNode
     name: camera_left
-    driver: ZedCamera
-    device_id: "YOUR_SERIAL"
-    resolution: HD720
+    driver: RealSenseCamera
+    device_id: "409122274921"
+    resolution: VGA
     fps: 30
 
   - type: CameraNode
     name: camera_right
-    driver: ZedCamera
-    device_id: "YOUR_SERIAL"
-    resolution: HD720
+    driver: RealSenseCamera
+    device_id: "352122271723"
+    resolution: VGA
     fps: 30

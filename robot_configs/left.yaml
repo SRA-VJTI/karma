@@ -11,8 +11,8 @@ motor_chain:
     - [0x07, "DM4310"]
   motor_offset: [0, 0, 0, 0, 0, 0, 0]
   motor_direction: [1, 1, 1, 1, 1, 1, 1]
-  # channel: "can_left"
-  channel: "can_follow_l"
+  # channel: "can_follow_l"  # udev alias not installed on this box; using raw can0
+  channel: "can0"
   motor_chain_name: "left"
   receive_mode:
     _target_: i2rt.motor_drivers.dm_driver.ReceiveMode
@@ -31,5 +31,10 @@ joint_limits:
   - [-2.00, 2.00]
 # gripper_limits: [0.0, -2.4] # a smaller opening, full opening is -2.7
 enable_gripper_calibration: true
+# Gentler sweep than the i2rt defaults (0.5 Nm / 2.0 s per direction). The
+# defaults can slam the gripper into its mechanical stops loudly enough to
+# risk damage; 0.2 Nm / 1.0 s still resolves the stops reliably.
+test_torque: 0.2
+test_duration: 1.0
 limit_gripper_force: 50.0
 # gripper_type: "yam_small"

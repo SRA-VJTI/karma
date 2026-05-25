@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8"/>
+  <title>YAM VR Teleop</title>
+  <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+  <style>
+    #overlay {
+      position: fixed; top: 0; left: 0; width: 100%; z-index: 9999;
+      background: rgba(0,0,0,0.65); color: #fff;
+      font-family: monospace; font-size: 13px; padding: 10px;
+      pointer-events: auto;
+    }
+  </style>
+</head>
+<body>
+
+<div id="overlay">
+  <div id="status">WS: disconnected | XR: waiting</div>
+  <div id="poses">L: — | R: —</div>
+  <div id="dbg"></div>
+  <div style="margin-top:6px">
+    <button id="calLeft"  style="margin-right:8px;padding:6px 12px;background:#1f6feb;color:#fff;border:none;border-radius:6px;cursor:pointer">Cal Wrist L (5s twist)</button>
+    <button id="calRight" style="padding:6px 12px;background:#1f6feb;color:#fff;border:none;border-radius:6px;cursor:pointer">Cal Wrist R (5s twist)</button>
+  </div>
+</div>
+
+<!-- XRMode: xr = tries AR (passthrough) first, falls back to VR if not supported -->
+<a-scene
+  xr-mode-ui="XRMode: xr; cardboardModeEnabled: false"
+  webxr="requiredFeatures: local-floor; optionalFeatures: bounded-floor"
+  background="color: #222"
+  renderer="antialias: false; alpha: true">
+
+  <a-entity id="leftCtrl"  oculus-touch-controls="hand: left;  model: false"></a-entity>
+  <a-entity id="rightCtrl" oculus-touch-controls="hand: right; model: false"></a-entity>
+
+</a-scene>
+
+<script>
+  const statusEl = document.getElementById('status');
+  const posesEl  = document.getElementById('poses');
+  const dbgEl    = document.getElementById('dbg');
+  const WS_URL   = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:8766/ws`;
+
+  function dbg(msg) { dbgEl.textContent = msg; console.log(msg); }
+
+  // ── WebSocket ──────────────────────────────────────────────────────────────
+  let ws = null;
+  let xrState = 'waiting';
+
+  function connectWS() {
+    ws = new WebSocket(WS_URL);
+    ws.onopen  = () => { statusEl.textContent = `WS: connected | XR: ${xrState}`; };
+    ws.onclose = () => { statusEl.textContent = `WS: disconnected | XR: ${xrState}`; setTimeout(connectWS, 2000); };
+    ws.onerror = () => dbg('WS error');
+  }
+  connectWS();
+
+  function send(obj) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+  }
+
+  // ── Controller streaming ───────────────────────────────────────────────────
+  let lastSend = 0;
+  const SEND_HZ = 60;
+
+  AFRAME.registerComponent('pose-streamer', {
+    init() {
+      this.left  = document.getElementById('leftCtrl').object3D;
+      this.right = document.getElementById('rightCtrl').object3D;
+
+      this.btns = {
+        left:  { grip: 0, trigger: 0 },
+        right: { grip: 0, trigger: 0 },
+      };
+
+      const L = document.getElementById('leftCtrl');
+      const R = document.getElementById('rightCtrl');
+
+      L.addEventListener('gripdown',    () => this.btns.left.grip    = 1);
+      L.addEventListener('gripup',      () => this.btns.left.grip    = 0);
+      L.addEventListener('triggerdown', () => this.btns.left.trigger = 1);
+      L.addEventListener('triggerup',   () => this.btns.left.trigger = 0);
+
+      R.addEventListener('gripdown',    () => this.btns.right.grip    = 1);
+      R.addEventListener('gripup',      () => this.btns.right.grip    = 0);
+      R.addEventListener('triggerdown', () => this.btns.right.trigger = 1);
+      R.addEventListener('triggerup',   () => this.btns.right.trigger = 0);
+
+      this.el.sceneEl.addEventListener('enter-vr', () => {
+        xrState = 'in AR';
+        statusEl.textContent = `WS: ${ws?.readyState===1?'connected':'disconnected'} | XR: in AR`;
+      });
+      this.el.sceneEl.addEventListener('exit-vr', () => { xrState = 'waiting'; });
+
+      document.getElementById('calLeft').addEventListener('click',  () => this.startWristCal('left'));
+      document.getElementById('calRight').addEventListener('click', () => this.startWristCal('right'));
+    },
+
+    startWristCal(side) {
+      send({ type: 'wrist_cal_start', side });
+      dbg(`wrist cal ${side} — twist wrist for 5s`);
+      setTimeout(() => { send({ type: 'wrist_cal_end', side }); dbg(`wrist cal ${side} done`); }, 5000);
+    },
+
+    tick(t) {
+      if (!this.el.sceneEl.is('vr-mode')) return;
+      if (t - lastSend < 1000 / SEND_HZ) return;
+      lastSend = t;
+
+      const lp = this.left.position,  lq = this.left.quaternion;
+      const rp = this.right.position, rq = this.right.quaternion;
+
+      send({
+        type:  'poses',
+        left:  { pos: [lp.x,lp.y,lp.z], quat: [lq.w,lq.x,lq.y,lq.z], grip: this.btns.left.grip,  trigger: this.btns.left.trigger  },
+        right: { pos: [rp.x,rp.y,rp.z], quat: [rq.w,rq.x,rq.y,rq.z], grip: this.btns.right.grip, trigger: this.btns.right.trigger },
+      });
+
+      posesEl.textContent =
+        `L:[${lp.x.toFixed(2)},${lp.y.toFixed(2)},${lp.z.toFixed(2)}] grip=${this.btns.left.grip} trig=${this.btns.left.trigger}` +
+        ` | R:[${rp.x.toFixed(2)},${rp.y.toFixed(2)},${rp.z.toFixed(2)}] grip=${this.btns.right.grip} trig=${this.btns.right.trigger}`;
+    }
+  });
+
+  document.querySelector('a-scene').setAttribute('pose-streamer', '');
+</script>
+</body>
+</html>

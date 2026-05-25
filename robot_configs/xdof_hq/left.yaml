@@ -35,5 +35,10 @@ joint_limits:
 # the DM4310 rotor. Auto-calibration discovers the true stops so commanding
 # normalized 0 or 1 lands on a holdable position.
 enable_gripper_calibration: true
+# Gentler sweep than the i2rt defaults (0.5 Nm / 2.0 s per direction). The
+# defaults can slam the gripper into its mechanical stops loudly enough to
+# risk damage; 0.2 Nm / 1.0 s still resolves the stops reliably.
+test_torque: 0.2
+test_duration: 1.0
 limit_gripper_force: 50.0
 # gripper_type: "yam_small"

@@ -85,6 +85,8 @@ class GelloLeaderAgent(Agent):
         hold_gripper: bool = True,
         include_gripper: bool = False,
         dither: bool = True,
+        pos_deadband_deg: float = 0.0,
+        gripper_deadband: float = 0.0,
         dagger_debug: bool = False,
         dagger_debug_pose_rad: Optional[List[float]] = False,
         record_on_intervention: bool = False,
@@ -96,6 +98,16 @@ class GelloLeaderAgent(Agent):
         self.include_gripper = include_gripper
         self.record_on_intervention = record_on_intervention
         self._held_action: Optional[Dict[str, Any]] = None
+
+        # Per-joint deadband applied in output-degrees space: if the new reading
+        # differs from the last published value by less than this, hold the
+        # last value. Suppresses dither residual, encoder quantization (~0.088°
+        # on STS3215), and small mechanical backlash from reaching the YAM.
+        # 0.0 disables.
+        self.pos_deadband_deg = float(pos_deadband_deg)
+        self.gripper_deadband = float(gripper_deadband)
+        self._last_pub_deg: Optional[np.ndarray] = None
+        self._last_pub_gripper: Optional[float] = None
 
         # device_id determines the calibration file name; fall back to robot_name
         # so a device named "left" automatically picks up left.json.
@@ -270,10 +282,25 @@ class GelloLeaderAgent(Agent):
 
         # Apply sign flips and offsets, then convert to radians
         joint_deg = self.joint_signs * joint_deg + self.joint_offsets_deg
+
+        if self.pos_deadband_deg > 0.0:
+            if self._last_pub_deg is None:
+                self._last_pub_deg = joint_deg.copy()
+            else:
+                delta = joint_deg - self._last_pub_deg
+                moved = np.abs(delta) >= self.pos_deadband_deg
+                self._last_pub_deg = np.where(moved, joint_deg, self._last_pub_deg)
+            joint_deg = self._last_pub_deg
+
         joint_rad = np.deg2rad(joint_deg)
 
         if self.include_gripper:
             gripper = action["gripper.pos"]
+            if self.gripper_deadband > 0.0:
+                if (self._last_pub_gripper is None
+                        or abs(gripper - self._last_pub_gripper) >= self.gripper_deadband):
+                    self._last_pub_gripper = gripper
+                gripper = self._last_pub_gripper
             pos = np.concatenate([joint_rad, [gripper]])
         else:
             pos = joint_rad

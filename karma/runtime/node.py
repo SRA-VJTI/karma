@@ -150,6 +150,10 @@ class Node(ABC):
     def resume(self) -> None:
         self._paused = False
 
+    def go_home(self) -> None:
+        """Drive to home pose. Default no-op; RobotNode overrides."""
+        pass
+
     @property
     def is_paused(self) -> bool:
         return self._paused
@@ -377,6 +381,14 @@ def _host_worker(
                 except Exception:
                     pass
                 ctrl.send(_CTRL_OK)
+            elif msg == b"GO_HOME":
+                # Blocks here for the duration of the move (~2s typical).
+                # That's fine — the requester is happy to wait.
+                try:
+                    node.go_home()
+                except Exception:
+                    pass
+                ctrl.send(_CTRL_OK)
             else:
                 # Unknown command — send OK to unblock the requester
                 ctrl.send(_CTRL_OK)
@@ -467,6 +479,22 @@ class ProcessHost:
         assert self._ctrl is not None
         self._ctrl.send(b"RELOAD_AGENT")
         self._ctrl.recv()
+
+    def go_home(self, timeout: float = 30.0) -> None:
+        """Tell the node subprocess to run its go_home routine.
+
+        Blocks until the move completes (or *timeout* expires).  The receive
+        timeout is bumped temporarily so the long blocking move doesn't trip
+        the default socket timeout.
+        """
+        assert self._ctrl is not None
+        prev = self._ctrl.getsockopt(zmq.RCVTIMEO)
+        self._ctrl.setsockopt(zmq.RCVTIMEO, int(timeout * 1000))
+        try:
+            self._ctrl.send(b"GO_HOME")
+            self._ctrl.recv()
+        finally:
+            self._ctrl.setsockopt(zmq.RCVTIMEO, prev)
 
     def stop(self, timeout: float = 3.0) -> None:
         if self._ctrl is not None:

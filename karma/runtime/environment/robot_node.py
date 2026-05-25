@@ -82,6 +82,10 @@ class RobotNode(Node):
         # a custom list, or set `shutdown_joint_pos: null` to skip parking.
         shutdown_joint_pos: list[float] | None = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
         shutdown_duration_s: float = 2.0,
+        # Home pose used by the [h] key between recordings. Defaults to
+        # startup_joint_pos so the YAM returns to the same pose used at boot.
+        home_joint_pos: list[float] | None = None,
+        home_duration_s: float = 2.0,
         ramp_duration_s: float = 1.5,
         resume_gap_s: float = 0.2,
         writer=None,
@@ -100,6 +104,11 @@ class RobotNode(Node):
         self._startup_duration_s = startup_duration_s
         self._shutdown_joint_pos = shutdown_joint_pos
         self._shutdown_duration_s = shutdown_duration_s
+        self._home_joint_pos = home_joint_pos if home_joint_pos is not None else startup_joint_pos
+        self._home_duration_s = float(home_duration_s)
+        # Set while go_home() is driving the arm: step() short-circuits so the
+        # control thread owns the driver during the scripted move.
+        self._homing: bool = False
         # Safe-handoff ramp state. On the first command and after any gap
         # longer than resume_gap_s, seed _ramp_seed from the robot's actual
         # joint_pos and blend smoothly from seed → target over ramp_duration_s
@@ -131,6 +140,11 @@ class RobotNode(Node):
     def step(self) -> None:
         ts = time.time()
         now = time.monotonic()
+
+        # Homing: the control thread is driving the robot directly. Don't touch
+        # the driver from the step loop to avoid concurrent read/write contention.
+        if self._homing:
+            return
 
         # Paused: don't issue joint commands. i2rt's internal control loop keeps
         # the motors at the last commanded position. Skip _last_msg_ts updates
@@ -194,6 +208,27 @@ class RobotNode(Node):
                         print(f"[{self.name}] Failed to {method} robot: {exc}")
                     break
 
+    def go_home(self) -> None:
+        """Drive the arm to the configured home pose via _move_to_pose().
+
+        Caller is expected to have paused the session first so cmd_topic
+        messages don't fight the move. After the move, ramp state is reset
+        so the next incoming cmd triggers a fresh handoff ramp (smooth blend
+        from the home pose back to whatever the leader is at).
+        """
+        if self._home_joint_pos is None or self._robot is None:
+            return
+        print(f"[{self.name}] Going home over {self._home_duration_s:.1f}s")
+        self._homing = True
+        try:
+            self._move_to_pose(self._home_joint_pos, self._home_duration_s)
+        finally:
+            self._homing = False
+        self._last_msg_ts = 0.0
+        self._ramping = False
+        self._ramp_seed = None
+        print(f"[{self.name}] Home pose reached")
+
     def _move_to_pose(self, target: list[float], duration_s: float) -> None:
         """Smoothly interpolate robot to target joint position."""
         target_arr = np.asarray(target, dtype=np.float64)
@@ -222,6 +257,8 @@ class RobotNode(Node):
             "startup_duration_s",
             "shutdown_joint_pos",
             "shutdown_duration_s",
+            "home_joint_pos",
+            "home_duration_s",
             "ramp_duration_s",
             "resume_gap_s",
         ):

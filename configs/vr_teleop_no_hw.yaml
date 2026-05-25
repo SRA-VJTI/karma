@@ -1,0 +1,28 @@
+version: "1"
+
+# No-hardware VR teleop — runs the Viser IK viewer + WebXR server only.
+# No robot or camera nodes needed.  Use to test VR calibration + IK before
+# connecting real hardware.
+
+session:
+  save_root: recordings
+
+nodes:
+  - type: AgentNode
+    name: yam_vr
+    agent_class: karma.agents.teleoperation.yam_vr_teleop_agent:YamVRTeleopAgent
+    agent_kwargs:
+      bimanual: true
+      viser_port: 8080
+      vr_port: 8766
+      workspace_scale: 1.5      # hand 30cm → robot ~45cm; 2.0 for Franka, 1.5 for smaller YAM
+      position_smoothing: 0.85  # 0 = raw, ~0.9 = very smooth (more lag)
+      dead_zone_m: 0.003        # ignore VR deltas < 3mm (kills hand tremor)
+      speed_damping: 3.0        # was 4.0; softer so scale isn't crushed at moderate speed
+      ssl_certfile: /home/yambox/karma/cert.pem
+      ssl_keyfile: /home/yambox/karma/key.pem
+      right_arm_extrinsic:
+        position: [0.0, -0.61, 0.0]
+        rotation: [1.0, 0.0, 0.0, 0.0]
+    loop_mode: fixed_rate
+    poll_freq: 100.0

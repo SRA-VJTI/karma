@@ -63,20 +63,19 @@ class ViserAbstractBase(ABC):
         self.bimanual = bimanual
         self.coordinate_frame = coordinate_frame
 
+        self._robot_description = robot_description
         if robot_description == "yam_description":  # temporary fix for yam_description
-            # current path
             current_path = os.path.dirname(os.path.abspath(__file__))
-            urdf_path = os.path.join(
-                current_path, "..", "..", "..", "dependencies", "i2rt", "i2rt", "robot_models", "yam", "yam.urdf"
+            self._urdf_path = os.path.join(
+                current_path, "..", "..", "..", "dependencies", "i2rt", "i2rt", "robot_models", "arm", "yam", "yam.urdf"
             )
-            mesh_dir = os.path.join(
-                current_path, "..", "..", "..", "dependencies", "i2rt", "i2rt", "robot_models", "yam", "assets"
+            self._mesh_dir = os.path.join(
+                current_path, "..", "..", "..", "dependencies", "i2rt", "i2rt", "robot_models", "arm", "yam", "assets"
             )
-            self.urdf = yourdfpy.URDF.load(
-                urdf_path,
-                mesh_dir=mesh_dir,
-            )
+            self.urdf = yourdfpy.URDF.load(self._urdf_path, mesh_dir=self._mesh_dir)
         else:
+            self._urdf_path = None
+            self._mesh_dir = None
             self.urdf = set_min_distance_from_limits(
                 load_urdf_robot_description(robot_description), min_distance_from_limits=0.25
             )
@@ -92,6 +91,14 @@ class ViserAbstractBase(ABC):
         self._setup_visualization()
         self._setup_gui()
         self._setup_transform_handles()
+
+    def _load_fresh_urdf(self) -> yourdfpy.URDF:
+        """Return a freshly loaded URDF instance (avoids deepcopy issues)."""
+        if self._urdf_path is not None:
+            return yourdfpy.URDF.load(self._urdf_path, mesh_dir=self._mesh_dir)
+        return set_min_distance_from_limits(
+            load_urdf_robot_description(self._robot_description), min_distance_from_limits=0.25
+        )
 
     def _setup_visualization(self):
         """Setup basic visualization elements."""

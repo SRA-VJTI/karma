@@ -101,6 +101,7 @@ def _help_line(session=None) -> Text:
     t = Text(justify="right", style="dim")
     t.append("[r]", style="bold white"); t.append(" record  ")
     t.append("[d]", style="bold white"); t.append(" discard  ")
+    t.append("[h]", style="bold white"); t.append(" home  ")
     t.append("[space]", style="bold white")
     if session is not None and session.is_paused:
         t.append(" resume  ")
@@ -238,6 +239,10 @@ def _read_keys(session, stop_event: threading.Event) -> None:
                 session.toggle_recording()
             elif ch == "d":
                 session.end_episode(save=False)
+            elif ch == "h":
+                # Run in a thread — go_home blocks for several seconds and we
+                # don't want to freeze the key reader (or block [q]) during it.
+                threading.Thread(target=session.go_home, daemon=True).start()
             elif ch == " ":
                 session.toggle_pause()
             elif ch == "l":

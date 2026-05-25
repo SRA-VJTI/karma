@@ -7,6 +7,7 @@ on command clipping to prevent future violations.
 
 import logging
 
+import can
 import numpy as np
 
 from i2rt.robots.motor_chain_robot import MotorChainRobot
@@ -24,6 +25,43 @@ class SafeMotorChainRobot(MotorChainRobot):
         self._initialization_complete = False
         super().__init__(*args, **kwargs)
         self._initialization_complete = True
+
+    def stop(self) -> None:
+        # RobotNode.cleanup() only powers motors off via hasattr(robot, "stop").
+        # MotorChainRobot exposes close() but not stop(), so without this
+        # method the motors stay energized after a session ends.
+        #
+        # We can't just call close() — its motor_off path sends the disable
+        # frame through _send_message_get_response, which waits for a reply
+        # and retries 5x0.2 s when the reply is lost on a busy CAN bus.
+        # Combined with the unbounded _server_thread.join() in close(), that
+        # routinely overruns the 3 s ProcessHost.stop() join window and the
+        # subprocess gets SIGKILL'd before the motors are ever disabled.
+        # That timing race is exactly why one arm goes limp and the other
+        # stays stiff.
+        #
+        # So before invoking the normal close, fire-and-forget the DM disable
+        # frame (data byte 0xFD) directly on the bus for every motor. Motors
+        # see the frame within milliseconds and drop torque immediately;
+        # close() afterwards still does the thread teardown but is no longer
+        # safety-critical.
+        try:
+            mc = self.motor_chain
+            mc.running = False  # ask the control loop to stop ASAP
+            for motor_id, _motor_type in mc.motor_list:
+                disable_frame = can.Message(
+                    arbitration_id=motor_id,
+                    data=[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFD],
+                    is_extended_id=False,
+                )
+                for _ in range(3):
+                    try:
+                        mc.motor_interface.bus.send(disable_frame)
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logging.warning(f"SafeMotorChainRobot.stop direct disable failed: {exc}")
+        self.close()
 
     def _check_current_qpos_in_joint_limits(self, buffer_rad: float = 0.1) -> None:
         """Check if the self._joint_state is in the joint limits.

@@ -32,7 +32,7 @@ class YamPyrokiViserAgent(Agent):
         self.base_frame_left_real = self.viser_server.scene.add_frame("/base_left_real", show_axes=False)
         self.urdf_vis_left_real = viser.extras.ViserUrdf(
             self.viser_server,
-            deepcopy(self.ik.urdf),
+            self.ik._load_fresh_urdf(),
             root_node_name="/base_left_real",
             mesh_color_override=(0.8, 0.5, 0.5),
         )
@@ -51,7 +51,7 @@ class YamPyrokiViserAgent(Agent):
             self.base_frame_right_real.position = self.ik.base_frame_right.position
             self.urdf_vis_right_real = viser.extras.ViserUrdf(
                 self.viser_server,
-                deepcopy(self.ik.urdf),
+                self.ik._load_fresh_urdf(),
                 root_node_name="/base_left_real/base_right_real",
                 mesh_color_override=(0.8, 0.5, 0.5),
             )
