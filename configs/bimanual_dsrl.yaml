@@ -30,7 +30,7 @@ nodes:
       port: 6112
       # Startup task prompt — used for any obs read before the first RESET.
       # The trainer's RESET.task always wins per-episode.
-      task: "pack container"
+      task: "stack the cubes"
       # Trainer has no episode cap; the bridge owns it. After this many STEPs
       # the bridge sets truncated=True and the default reward hook prompts the
       # operator for success y/N.
