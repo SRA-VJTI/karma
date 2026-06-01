@@ -88,7 +88,7 @@ class _SharedState:
     hw_fault: bool = False
 
 
-class DSRLBridgeAgent(PolicyAgent):
+class RobotBridgeAgent(PolicyAgent):
     """Karma ``PolicyAgent`` that proxies the YAM to a remote RL trainer."""
 
     use_joint_state_as_action: bool = False
@@ -129,11 +129,11 @@ class DSRLBridgeAgent(PolicyAgent):
         self._server = _make_tcp_server((self.host, self.port), self)
         self._server_thread = threading.Thread(
             target=self._server.serve_forever,
-            name="DSRLBridgeAgent_tcp",
+            name="RobotBridgeAgent_tcp",
             daemon=True,
         )
         self._server_thread.start()
-        print(f"[DSRLBridgeAgent] listening on {self.host}:{self.port}")
+        print(f"[RobotBridgeAgent] listening on {self.host}:{self.port}")
 
     # ------------------------------------------------------------------ #
     # PolicyAgent API
@@ -428,7 +428,7 @@ class DSRLBridgeAgent(PolicyAgent):
                 line = tty.readline()
                 return line.strip() if line else default
         except OSError:
-            print(f"[DSRLBridgeAgent] /dev/tty unavailable; defaulting to {default!r}")
+            print(f"[RobotBridgeAgent] /dev/tty unavailable; defaulting to {default!r}")
             return default
 
 
@@ -463,7 +463,7 @@ def _send_message(sock: socket.socket, msg: Dict[str, Any]) -> None:
 
 class _BridgeRequestHandler(socketserver.BaseRequestHandler):
     def handle(self) -> None:
-        agent: DSRLBridgeAgent = self.server.agent  # type: ignore[attr-defined]
+        agent: RobotBridgeAgent = self.server.agent  # type: ignore[attr-defined]
         client = self.client_address
         print(f"[bridge] {client} connected", flush=True)
         # Loop until the client closes — supports both pipelined (one
@@ -514,7 +514,7 @@ class _BridgeTCPServer(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
-def _make_tcp_server(addr: Tuple[str, int], agent: DSRLBridgeAgent) -> _BridgeTCPServer:
+def _make_tcp_server(addr: Tuple[str, int], agent: RobotBridgeAgent) -> _BridgeTCPServer:
     server = _BridgeTCPServer(addr, _BridgeRequestHandler)
     server.agent = agent  # type: ignore[attr-defined]
     return server

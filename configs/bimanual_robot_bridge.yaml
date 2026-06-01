@@ -7,7 +7,7 @@ version: "1"
 # forwards the same obs schema to the MolmoAct2 server.
 #
 # On the YAMbox:
-#   rr-session configs/bimanual_dsrl.yaml
+#   rr-session configs/bimanual_robot_bridge.yaml
 #
 # On the GPU box (4090): start molmoact2_karma_server, then train_dsrl with
 # remote_robot.host pointed at this box.
@@ -23,8 +23,8 @@ session:
 
 nodes:
   - type: AgentNode
-    name: dsrl_bridge
-    agent_class: karma.agents.policy_learning.dsrl_bridge_agent:DSRLBridgeAgent
+    name: robot_bridge
+    agent_class: karma.agents.policy_learning.robot_bridge_agent:RobotBridgeAgent
     agent_kwargs:
       host: "0.0.0.0"
       port: 6112
@@ -57,7 +57,7 @@ nodes:
   - type: RobotNode
     name: yam_left
     robot_config: robot_configs/xdof_hq/left.yaml
-    cmd_topic: dsrl_bridge/left_pos
+    cmd_topic: robot_bridge/left_pos
     poll_freq: 200
     ramp_duration_s: 1.5
     startup_joint_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
@@ -68,7 +68,7 @@ nodes:
   - type: RobotNode
     name: yam_right
     robot_config: robot_configs/xdof_hq/right.yaml
-    cmd_topic: dsrl_bridge/right_pos
+    cmd_topic: robot_bridge/right_pos
     poll_freq: 200
     ramp_duration_s: 1.5
     startup_joint_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
