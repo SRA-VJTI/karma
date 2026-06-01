@@ -32,22 +32,23 @@ nodes:
 
       # MolmoAct2 language instruction. Leave empty to use the server's
       # --default-task; set here to override per client.
-      task: "pack container"
+      task: "stack the cubes"
 
-      # Server metadata currently advertises n_action_steps=10 and fps=10.
-      # Running the consumer at 10 Hz executes one model action per tick, giving
-      # ~1 s of chunk lookahead. Keep this aligned with the server metadata.
-      action_horizon: 10
+      # Execute only the first few steps of each predicted chunk, then re-query.
+      # Steady-state inference on the fine-tune server is ~150-220 ms, so at 10 Hz
+      # a 4-step horizon (0.4 s) re-plans well before the buffer empties = far more
+      # reactive, with smaller chunk-boundary jumps. Match the server's
+      # --n-action-steps (run it with --n-action-steps 4).
+      action_horizon: 4
       inference_mode: async              # sync | async | async_rate_limited | temporal_ensemble
       inference_interval_s: null         # optional rate cap for async modes
-      # Blend almost the full chunk so seams between successive inferences are
-      # invisible. At 10 Hz / horizon=10, blending 8-10 actions = 0.8-1 s of
-      # crossfade, which hides the boundary entirely.
-      min_smoothed_actions: 8
-      max_smoothed_actions: 10
-      # Stronger EMA to kill tick-to-tick jitter. 0.6 = 60% new + 40% prev;
-      # settles in ~3 ticks (0.3 s) — trade a little lag for silky motion.
-      output_smoothing_alpha: 0.6
+      # Light crossfade: enough to hide seams without adding lag. (Heavy blending
+      # 8-10 = smooth but sluggish; this trades a touch of smoothness for response.)
+      min_smoothed_actions: 2
+      max_smoothed_actions: 4
+      # Light EMA: 0.85 = 85% new + 15% prev. Kills tick jitter but stays snappy
+      # (settles in ~1 tick). Lower it toward 0.6 only if motion is still jittery.
+      output_smoothing_alpha: 0.85
 
       # By default, send raw camera frames as CHW uint8 and let the server/model
       # processor handle size. If bandwidth is an issue, set image_preprocess to
