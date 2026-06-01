@@ -32,7 +32,7 @@ nodes:
 
       # MolmoAct2 language instruction. Leave empty to use the server's
       # --default-task; set here to override per client.
-      task: "pack container"
+      task: "fold clothes"
 
       # Server metadata currently advertises n_action_steps=10 and fps=10.
       # Running the consumer at 10 Hz executes one model action per tick, giving
@@ -45,9 +45,17 @@ nodes:
       # crossfade, which hides the boundary entirely.
       min_smoothed_actions: 8
       max_smoothed_actions: 10
-      # Stronger EMA to kill tick-to-tick jitter. 0.6 = 60% new + 40% prev;
-      # settles in ~3 ticks (0.3 s) — trade a little lag for silky motion.
-      output_smoothing_alpha: 0.6
+      # Stronger EMA to kill tick-to-tick jitter. 0.4 = 40% new + 60% prev;
+      # settles in ~5 ticks (0.5 s) — trade a little lag for silky motion.
+      output_smoothing_alpha: 0.4
+
+      # Hard per-tick velocity caps on the final absolute command stream. At
+      # 10 Hz, 0.08 rad/tick = ~0.8 rad/s max joint speed, which clips any
+      # remaining jerky jumps the EMA lets through. Gripper is in normalized
+      # units. Raise these if the arms feel sluggish / lag the chunk; lower
+      # them if motion still looks snappy. Watch debug_action_stats to tune.
+      max_joint_step_per_tick: 0.08
+      max_gripper_step_per_tick: 0.15
 
       # By default, send raw camera frames as CHW uint8 and let the server/model
       # processor handle size. If bandwidth is an issue, set image_preprocess to
