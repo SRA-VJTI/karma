@@ -1,17 +1,18 @@
 version: "1"
 
-# Bimanual YAM DSRL/RLT bridge deployment.
+# Bimanual YAM robot bridge deployment (RLT / DSRL online training).
 #
 # Runs the robot as a PASSIVE EXECUTOR for an external RL trainer instead of a
-# policy. The DSRLBridgeAgent opens a TCP server on :6112; the trainer (GPU box
-# / rltoken/eval_baseline.py or the robometer DSRL/RLT loop) connects and steps
-# the robot via reset/step messages, getting obs + done back.
+# policy. The RobotBridgeAgent opens a TCP server on :6112; the trainer (GPU box
+# / rltoken/eval_baseline.py or the robometer RLT/DSRL loop) connects and steps
+# the robot via reset/step messages, getting obs + done back. The bridge is
+# method-agnostic — it just executes whatever chunks the trainer sends.
 #
-#   trainer  --reset/step-->  DSRLBridgeAgent (:6112)  --commands-->  RobotNodes
+#   trainer  --reset/step-->  RobotBridgeAgent (:6112)  --commands-->  RobotNodes
 #            <--obs/done-----
 #
 # On the robot box:
-#   krm session configs/bimanual_dsrl_bridge.yaml
+#   krm session configs/bimanual_robot_bridge.yaml
 #   # press [space] to unpause when arms/cams are ready, then start the trainer.
 #
 # The MolmoAct2 server (ws:8112) is contacted by the TRAINER, not by this
@@ -24,8 +25,8 @@ session:
 
 nodes:
   - type: AgentNode
-    name: dsrl_bridge
-    agent_class: karma.agents.policy_learning.dsrl_bridge_agent:DSRLBridgeAgent
+    name: robot_bridge
+    agent_class: karma.agents.policy_learning.robot_bridge_agent:RobotBridgeAgent
     agent_kwargs:
       host: 0.0.0.0
       port: 6112
@@ -51,7 +52,7 @@ nodes:
   - type: RobotNode
     name: left
     robot_config: robot_configs/xdof_hq/left.yaml
-    cmd_topic: dsrl_bridge/left_pos
+    cmd_topic: robot_bridge/left_pos
     poll_freq: 200
     ramp_duration_s: 1.5
     startup_joint_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
@@ -60,7 +61,7 @@ nodes:
   - type: RobotNode
     name: right
     robot_config: robot_configs/xdof_hq/right.yaml
-    cmd_topic: dsrl_bridge/right_pos
+    cmd_topic: robot_bridge/right_pos
     poll_freq: 200
     ramp_duration_s: 1.5
     startup_joint_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
@@ -98,7 +99,7 @@ nodes:
     up_axis: "+z"
     initial_camera_position: [-0.7, -0.31, 0.3]
     initial_camera_look_at:  [0.45, -0.31, 0.3]
-    chunk_topic: dsrl_bridge/chunk
+    chunk_topic: robot_bridge/chunk
     n_chunk_frames: 10
     chunk_frame_axes_length: 0.03
     urdfs:

@@ -1,11 +1,15 @@
-"""DSRL / RLT robot bridge agent for karma.
+"""Robot bridge agent for karma (RLT / DSRL online training).
 
 Exposes the YAM as a *passive executor* over a length-prefixed pickle TCP
-socket (default ``:6112``) so an external RL trainer (the robometer DSRL/RLT
+socket (default ``:6112``) so an external RL trainer (the robometer RLT/DSRL
 loop, or ``rltoken/eval_baseline.py``) can drive the robot in a closed loop::
 
-    trainer  --reset/step-->  DSRLBridgeAgent  --commands-->  RobotNodes
+    trainer  --reset/step-->  RobotBridgeAgent  --commands-->  RobotNodes
              <--obs/done-----
+
+Method-agnostic: it knows nothing about RLT (``ã + Δa`` chunk refinement) vs
+DSRL (``z₀`` noise) — the algorithm lives entirely in the trainer; this agent
+just moves the arms and reports obs.
 
 It is a drop-in replacement for ``AsyncMolmoAct2Agent`` in a karma session:
 same camera / joint_state / cmd topics. Instead of running a policy itself, it
@@ -65,7 +69,7 @@ from karma.agents.policy_learning.async_molmoact2_agent import (
     _recursive_flatten,
 )
 
-log = logging.getLogger("dsrl_bridge_agent")
+log = logging.getLogger("robot_bridge_agent")
 
 # Default home pose per arm: 6 zeroed joints + gripper open (1.0). Matches the
 # molmoact2 session's RobotNode startup_joint_pos and CLAUDE.md's
@@ -101,11 +105,13 @@ def _recv_framed(sock: socket.socket) -> Optional[Any]:
     return pickle.loads(payload)
 
 
-class DSRLBridgeAgent(PolicyAgent):
+class RobotBridgeAgent(PolicyAgent):
     """Karma agent that turns the robot into a socket-driven executor for RL.
 
     Lives on the robot box. The trainer (GPU box / rltoken) connects to
     ``host:port`` and steps the robot via the protocol documented above.
+    Method-agnostic — works for the RLT chunk-refinement loop, the DSRL noise
+    loop, or any trainer speaking the same protocol.
     """
 
     def __init__(
@@ -148,9 +154,9 @@ class DSRLBridgeAgent(PolicyAgent):
         self._missing_log_ts = 0.0
 
         self._stop = threading.Event()
-        self._server_thread = threading.Thread(target=self._serve_forever, name="dsrl-bridge", daemon=True)
+        self._server_thread = threading.Thread(target=self._serve_forever, name="robot-bridge", daemon=True)
         self._server_thread.start()
-        log.info("DSRLBridgeAgent listening on %s:%d (max_steps=%d, home_on_reset=%s)",
+        log.info("RobotBridgeAgent listening on %s:%d (max_steps=%d, home_on_reset=%s)",
                  self.host, self.port, self.max_steps, self.home_on_reset)
 
     # ------------------------------------------------------------------ #
