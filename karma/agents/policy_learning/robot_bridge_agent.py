@@ -72,6 +72,33 @@ TICK_HZ = 10.0
 HOME_TICKS = 20  # 2.0 s at 10 Hz
 DEFAULT_MAX_STEPS = 6
 
+# ---------------------------------------------------------------------------
+# Safety bounds — empirically derived from the 44 stack-cube demos (10 Hz, the
+# `action` column; analysis 2026-06-02). Demos and the bridge share the joint
+# layout [L_j0..L_j5, L_grip, R_j0..R_j5, R_grip]. These cap how FAR (position
+# envelope) and how FAST (per-tick rate limit) the arm can be commanded,
+# independent of what the RL trainer sends — the seatbelt for online training.
+# ---------------------------------------------------------------------------
+# Per-tick |Δ| demo max over ALL arm joints = 0.265 rad; 0.35 = ~30% headroom,
+# so a normal trajectory never trips but a single-tick slam is caught.
+DEFAULT_MAX_JOINT_STEP = 0.35  # rad per 10 Hz tick (arm joints only)
+# Arm-joint indices (grippers 6,13 excluded — release must be free to commit).
+ARM_IDX = np.array([0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12], dtype=np.int64)
+# Per-joint position envelope = demo action [min,max] padded ±0.15 rad.
+# Grippers fixed to [0,1] (0=open, 1=closed); their padded entries below are the
+# raw [0,1] and are also enforced explicitly in _clip.
+JOINT_POS_LO = np.array(
+    [-1.38, -0.17, -0.18, -1.51, -1.32, -2.04, 0.0,
+     -0.70, -0.18, -0.15, -1.48, -0.94, -1.44, 0.0], dtype=np.float32)
+JOINT_POS_HI = np.array(
+    [0.82, 2.96, 2.85, 1.23, 0.57, 0.98, 1.0,
+     1.24, 2.99, 2.94, 1.54, 0.59, 1.22, 1.0], dtype=np.float32)
+# A clamp larger than this margin counts as the trainer genuinely fighting a
+# limit (not float noise); CLAMP_TRIP_TICKS consecutive trips -> hw_fault, which
+# the STEP handler already turns into a clean episode truncation + reset.
+CLAMP_TRIP_MARGIN = 0.05  # rad
+CLAMP_TRIP_TICKS = 5      # consecutive violating ticks (0.5 s at 10 Hz)
+
 
 @dataclass
 class _SharedState:
@@ -86,6 +113,7 @@ class _SharedState:
     episode_step: int = 0
     task: str = ""
     hw_fault: bool = False
+    clamp_trip_count: int = 0  # consecutive safety-clamp violations
 
 
 class RobotBridgeAgent(PolicyAgent):
@@ -103,6 +131,7 @@ class RobotBridgeAgent(PolicyAgent):
         action_dim: int = ACTION_DIM,
         image_hw: Tuple[int, int] | list[int] = IMAGE_HW,
         home_ticks: int = HOME_TICKS,
+        max_joint_step: float = DEFAULT_MAX_JOINT_STEP,
         reward_hook: Optional[Callable[..., Dict[str, Any]]] = None,
     ) -> None:
         self.host = str(host)
@@ -112,6 +141,7 @@ class RobotBridgeAgent(PolicyAgent):
         self._action_dim = int(action_dim)
         self._image_hw = (int(image_hw[0]), int(image_hw[1]))
         self._home_ticks = int(home_ticks)
+        self._max_joint_step = float(max_joint_step)
         self._io = MolmoAct2ModelIOConfig()
         self._reward_hook = reward_hook or self._default_reward_hook
 
@@ -154,6 +184,7 @@ class RobotBridgeAgent(PolicyAgent):
             "action_dim": self._action_dim,
             "image_hw": self._image_hw,
             "home_ticks": self._home_ticks,
+            "max_joint_step": self._max_joint_step,
         }
 
     def act(self, obs: Dict[str, Any]) -> Dict[str, Any]:
@@ -195,6 +226,7 @@ class RobotBridgeAgent(PolicyAgent):
             self._state.last_command = None
             self._state.home_start_state = None
             self._state.home_tick = 0
+            self._state.clamp_trip_count = 0
         self._homing_done.clear()
         self._chunk_done.clear()
 
@@ -251,12 +283,44 @@ class RobotBridgeAgent(PolicyAgent):
         return action
 
     def _clip(self, action: np.ndarray) -> np.ndarray:
+        """Hard safety floor: every command passes through here before it is
+        sent. Bounds position (envelope) and speed (per-tick rate limit) on the
+        arm joints, leaves the grippers free to commit, and trips ``hw_fault``
+        when the trainer keeps fighting a limit. Called under ``self._lock``.
+        """
         a = action.astype(np.float32, copy=True)
         if a.shape != (self._action_dim,):
             raise ValueError(f"action must be ({self._action_dim},); got {a.shape}")
-        # Gripper indices: 6 (left), 13 (right). Convention: 0=open, 1=closed.
+        raw = a.copy()
+
+        # (1) Gripper position bound: 6 (left), 13 (right). 0=open, 1=closed.
         a[6] = float(np.clip(a[6], 0.0, 1.0))
         a[13] = float(np.clip(a[13], 0.0, 1.0))
+        # (2) Arm-joint position envelope (demo-derived, padded). Gripper entries
+        #     in the arrays are [0,1] so this is a no-op there after step (1).
+        a = np.clip(a, JOINT_POS_LO, JOINT_POS_HI).astype(np.float32, copy=False)
+        # (3) Per-tick rate limit on arm joints — caps commanded speed no matter
+        #     what the trainer sends. Grippers exempt (release must commit fast).
+        last = self._state.last_command
+        if last is not None:
+            delta = a[ARM_IDX] - last[ARM_IDX]
+            delta = np.clip(delta, -self._max_joint_step, self._max_joint_step)
+            a[ARM_IDX] = last[ARM_IDX] + delta
+        # (4) If the command was meaningfully clamped for several ticks running,
+        #     the trainer is grinding against a limit — trip hw_fault so the STEP
+        #     handler truncates the episode (clean reset beats a silent grind).
+        if float(np.abs(a - raw).max()) > CLAMP_TRIP_MARGIN:
+            self._state.clamp_trip_count += 1
+            if (self._state.clamp_trip_count >= CLAMP_TRIP_TICKS
+                    and not self._state.hw_fault):
+                self._state.hw_fault = True
+                print(
+                    f"[bridge] SAFETY: {self._state.clamp_trip_count} consecutive "
+                    f"clamp trips -> hw_fault; episode will truncate",
+                    flush=True,
+                )
+        else:
+            self._state.clamp_trip_count = 0
         return a
 
     def _to_command_dict(self, action_vec: np.ndarray) -> Dict[str, Any]:
@@ -311,6 +375,7 @@ class RobotBridgeAgent(PolicyAgent):
             self._state.home_start_state = None
             self._state.home_tick = 0
             self._state.hw_fault = False
+            self._state.clamp_trip_count = 0
             self._state.phase = PHASE_HOMING
 
         if not self._homing_done.wait(timeout=10.0):
