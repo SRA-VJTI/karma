@@ -1,0 +1,111 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+.venv-*/
+venv/
+env/
+ENV/
+
+# Packaging / builds
+*.egg-info/
+.eggs/
+build/
+build*/
+dist/
+wheelhouse/
+pip-wheel-metadata/
+
+# =========================
+# Testing / linting / tools
+# =========================
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# =========================
+# UV / dependencies
+# =========================
+.deps/
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# IDE / Editors
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Environment / secrets
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# Logs
+# =========================
+*.log
+logs/
+
+# =========================
+# Generated data / outputs
+# =========================
+data/
+outputs/
+results/
+runs/
+checkpoints/
+checkpoints*/
+wandb/
+mlruns/
+
+# =========================
+# Robotics / simulation generated files
+# =========================
+*.bag
+*.db3
+*.mcap
+
+# Videos / recordings
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+
+# =========================
+# Temporary files
+# =========================
+*.tmp
+*.temp
+*.bak
+.cache/
+tmp/
+temp/

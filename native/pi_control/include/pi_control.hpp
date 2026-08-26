@@ -1,0 +1,170 @@
+/*!
+ * @file pi_control.hpp
+ * @brief Core definitions, constants, and enumerations.
+ */
+#pragma once
+
+#define DEFAULT_BAUD_RATE                         3000000            ///< Default baud rate (bits per second).
+#define DEFAULT_DOF_ARM                           6                  ///< Default arm DOF.
+#define DEFAULT_SERVO_NUM_ARM                     DEFAULT_DOF_ARM    ///< Default number of servos in arm.
+#define DEFAULT_DOF_EFFECTOR                      1                  ///< Default effector DOF.
+#define DEFAULT_SERVO_NUM_EFFECTOR                DEFAULT_DOF_EFFECTOR  ///< Default number of servos in effector.
+#define DEFAULT_JOYSTICK_NUM_CHANNEL              5                  ///< Default number of joystick channels.
+#define DEFAULT_JOYSTICK_NUM_BUTTON               5                  ///< Default number of joystick buttons.
+
+#define DEFAULT_VDC                               24.0               ///< Default DC bus voltage (volts).
+
+#define MAX_VELOCITY_THRESHOLD                    30.0               ///< Maximum velocity threshold (rad/s).
+#define TEMPERATURE_THRESHOLD_CAUTIOUS            60.0                ///< Cautious temperature threshold (degrees Celsius). Lower bound of the derating ramp.
+#define TEMPERATURE_THRESHOLD_CRITICAL            90.0                ///< Critical temperature threshold (degrees Celsius). Upper bound of the 60-90 derating ramp; clamps targets to current pose.
+#define TEMPERATURE_THRESHOLD_RANGE                (TEMPERATURE_THRESHOLD_CRITICAL - TEMPERATURE_THRESHOLD_CAUTIOUS)  ///< Temperature threshold range (degrees Celsius).
+#define TEMPERATURE_THRESHOLD_FORCE_STOP          93.0                ///< Force-stop temperature threshold (degrees Celsius). Single source of truth: exceeding this triggers emergency recovery (slow ready move + process exit) so the servo cannot burn. Must stay >= TEMPERATURE_THRESHOLD_CRITICAL.
+#define MAX_POS_DIFFERENCE_RAD                    0.3                ///< Maximum position difference threshold (radians).
+#define DEFAULT_TOLERABLE_POS_DIFFERENCE_RAD      0.2                ///< Default tolerable position difference (radians).
+#define DEFAULT_VELOCITY_THRESHOLD_RAD_SEC        0.1                ///< Default velocity threshold (rad/s).
+
+// Velocity-bounded move-to-ready speeds (rad/s). Every "move to ready" path (startup, command-driven
+// MOVE_TO_READY_POS, MOVE_TO_READY_AND_STOP, emergency recovery on CAN loss / over-temp / exception) uses
+// step = max_vel * loop_dt so the angular speed is bounded regardless of how far the arm is from home.
+// NORMAL is used for healthy stops (UI stop, episode end, command); ERROR is the slower speed used during
+// emergency recovery. Configurable via --move_to_ready_vel_rad_s_{normal,error}.
+#define MOVE_TO_READY_VEL_RAD_S_NORMAL            0.30f              ///< NORMAL speed for healthy move-to-ready.
+#define MOVE_TO_READY_VEL_RAD_S_ERROR             0.20f              ///< ERROR speed for emergency recovery (~1.5x slower than NORMAL).
+#define MOVE_TO_READY_VEL_RAD_S_NORMAL_EFFECTOR   3.0f               ///< Effector NORMAL speed; capped by each effector joint's configured vel_max.
+#define MOVE_TO_READY_VEL_RAD_S_ERROR_EFFECTOR    MOVE_TO_READY_VEL_RAD_S_ERROR   ///< Effector ERROR speed; conservative emergency-recovery rate.
+
+// Stuck detection thresholds for ready movement exit. A joint that has been commanded toward the
+// ready position but has not moved more than READY_MOVE_STUCK_POS_DELTA_RAD per iteration for
+// READY_MOVE_STUCK_ITER_THRESHOLD consecutive iterations is treated as stuck so the ready
+// movement can exit instead of waiting forever. Command frames keep flowing while stuck so a
+// physically released joint can still catch up. The threshold only applies while the joint is
+// outside ``pos_error_margin_`` of its target.
+#define READY_MOVE_STUCK_POS_DELTA_RAD            0.0001f             ///< Per-iteration measured-position floor (radians).
+#define READY_MOVE_STUCK_ITER_THRESHOLD           200                  ///< Consecutive iterations with sub-floor motion that mark a joint as stuck (~2s @ 100Hz).
+#define READY_MOVE_TOLERANCE_HYSTERESIS_RAD       0.001f               ///< Settling hysteresis added only to ready-completion checks.
+
+// Hard iteration budget for an entire move-to-ready. The stuck detector above resets whenever a
+// joint twitches past the motion floor, so a joint oscillating against an external load (e.g.
+// gravity sag fighting the position hold) can reset both the stuck counter and the arrival
+// confirmation window indefinitely -- the ready move then runs at full control-loop rate for
+// minutes (observed as the left-YAM startup retry storm, issue #5). The budget is derived from
+// the actual travel distance at init (so it is NOT a fixed timeout: long moves get long budgets)
+// and only fires when the move is far beyond the velocity-bounded travel time, at which point the
+// device completes best-effort and names the joints that never settled.
+#define READY_MOVE_BUDGET_TRAVEL_SCALE            3                    ///< Budget = scale x nominal velocity-bounded travel iterations.
+#define READY_MOVE_BUDGET_MIN_ITERS               1500                 ///< Budget floor so short moves still get settle time (~15s @ 100Hz).
+#define READY_MOVE_PROGRESS_LOG_PERIOD_ITERS      500                  ///< Period for in-progress laggard logging (~5s @ 100Hz).
+
+// Short wait after sending the ENCOS zero-effort enable command so the asynchronous CAN receive
+// thread has time to parse the first status frame into ``received_servo_data_``. Without this
+// wait the subsequent ``read_hardware_values()`` can race the parser and return pos=0.
+#define ENABLE_ENCOS_CACHE_WAIT_US                5000                 ///< Microseconds to wait after ENCOS enable.
+
+// Servo-side CAN communication-loss protection. The DM TIMEOUT register (0x09) auto-disables
+// the motor (latched 0xD error) when no frame arrives within the window; the ENCOS heartbeat
+// window behaves equivalently. The window survives in DM servo RAM between runs while power
+// stays on, so DriverCanMit::enable() explicitly disarms it (writes DM_SERVO_CAN_TIMEOUT_DISARM)
+// right after each enable handshake, and DriverCanMit::arm_comm_loss_protection() asserts the
+// per-device policy in one pass right before the command stream starts.
+//
+// Policy (Device::wants_comm_loss_stop()): what "keep executing the last command" means on a
+// CAN loss depends on the command type. A stale velocity/torque command is a runaway -> the
+// window is ARMED so the servo hard-stops. A stale position command is the hold pose -> the
+// window is DISARMED so the servo keeps holding instead of collapsing detorqued.
+#define DM_SERVO_CAN_TIMEOUT_MS                   500                  ///< DM register 0x09 protection window (ms).
+#define ENCOS_SERVO_CAN_TIMEOUT_MS                500                  ///< ENCOS heartbeat protection window (ms).
+#define DM_TIMEOUT_COUNTS_PER_MS                  20                   ///< DM register 0x09 unit: 50 us per count.
+#define DM_SERVO_CAN_TIMEOUT_DISARM               0                    ///< DM register 0x09 value: protection off.
+#define ENCOS_SERVO_CAN_TIMEOUT_DISARM            0                    ///< ENCOS heartbeat value: protection off.
+
+// Pre-loop servo verification (Device::verify_servos_operational()): settle time after the
+// probe command so the asynchronous receive thread parses every fresh status response before
+// verify_operational() re-reads the cache.
+#define VERIFY_SERVOS_PROBE_WAIT_US               5000                 ///< Probe-response settle time (us).
+
+// RX-thread select() timeout. Bounds how long stop_reception() blocks waiting for the
+// reception thread to notice the stop flag; 1 s made every enable handshake (which stops and
+// restarts reception per servo) pay up to a second of dead time.
+#define RECEIVE_LOOP_SELECT_TIMEOUT_MS            100                  ///< RX-thread select() timeout (ms).
+
+// Controller-side CAN staleness watchdog (complements the servo-side protection windows): the
+// control loop compares the wall-clock age of each servo's most recent parsed status frame
+// (ReceivedServoData::last_update_perf_) against these thresholds. Used by BOTH the per-servo
+// path (ServoDm::read_hardware_values -> SAFE_MODE_SIG) and the bulk path
+// (DriverCanMit::group_read_hardware_values -> dead_servo_ids -> device recovery), so the two
+// detectors agree. INITIAL applies until the first frame has ever been parsed for the driver
+// (bus may still be coming up after the enable handshakes); NORMAL applies afterwards and
+// never relaxes back.
+#define CAN_MIT_STALE_FRAME_AGE_NORMAL_MS             10000                ///< Frame age (ms) before a known-alive servo is declared dead. 10 s.
+#define CAN_MIT_STALE_FRAME_AGE_INITIAL_MS            2500                 ///< Frame age (ms) for the start-up phase (before any frame has ever been parsed). 2.5 s.
+
+// Warn-only telemetry-stall diagnostic (DriverCanMit::group_read_hardware_values): a servo whose
+// newest frame is older than this gets one edge-triggered PI_WARN ("telemetry stalled") and one
+// on recovery ("resumed after N ms"). Far below the dead thresholds above on purpose -- the
+// point is to leave evidence in the node log for stalls that silently feed a cached position
+// to the policy but never trip the 10 s dead detector.
+#define CAN_MIT_STALL_WARN_AGE_MS                     250                  ///< Frame age (ms) that triggers the warn-only stall log.
+
+// Whole-arm controller (DriverController) stall watchdog. Vendor controller
+// stacks (Trossen iNerve etc.) keep streaming the last command from a driver-
+// internal daemon thread even when the host control loop hangs, so a separate
+// watchdog thread idles the arm when the loop stops calling group read/write.
+#define CONTROLLER_STALL_WATCHDOG_TIMEOUT_MS      1000                 ///< Driver-interaction silence (ms) before the arm is idled.
+#define CONTROLLER_STALL_WATCHDOG_PERIOD_MS       100                  ///< Watchdog polling period (ms).
+
+// ARX read-only joint encoder (DriverArxEncoder) CAN feedback decoding.
+// Per the ARX encoder CAN protocol: each joint encoder broadcasts a fixed 2-byte
+// mechanical angle at 200 Hz. raw = (data[0] << 8) | data[1], covering 0..16384
+// mapped linearly onto -360..+360 deg, with 8192 the zero point. Therefore
+//   rad = (raw - ARX_ENCODER_ZERO_RAW) * PI / ARX_ENCODER_RAD_DIVISOR
+// where 16384 counts span 720 deg (4*PI rad) so PI/4096 rad per count.
+#define ARX_ENCODER_FEEDBACK_DLC                  2                    ///< Encoder feedback frame payload length (bytes).
+#define ARX_ENCODER_FULL_RAW                      16384                ///< Raw count spanning the full -360..+360 deg range.
+#define ARX_ENCODER_ZERO_RAW                      8192                 ///< Raw count corresponding to 0 rad.
+#define ARX_ENCODER_RAD_DIVISOR                   4096.0f              ///< Counts per PI rad (16384 counts / 4*PI rad).
+
+// The encoder free-runs at 200 Hz with no enable handshake, so DriverArxEncoder::enable
+// only has to confirm the async receive thread has parsed at least one frame before
+// ServoDm::verify_position_fresh() runs. Poll the cache slot up to MAX_RETRY times with
+// SLEEP_US between attempts (50 * 1 ms = 50 ms, ~10 frame periods on a healthy bus).
+#define ARX_ENCODER_WARMUP_MAX_RETRY              50                   ///< Max cache-freshness polls during encoder enable.
+#define ARX_ENCODER_WARMUP_SLEEP_US               1000                 ///< Microseconds between encoder warmup polls (1 ms).
+
+/*!
+ * @enum Role
+ * @brief Device roles in teleoperation.
+ */
+enum class Role {
+    LEADER = 0,   ///< Leader role.
+    FOLLOWER = 1, ///< Follower role.
+    UNKNOWN = 2   ///< Unknown role.
+};
+
+/*!
+ * @enum ReturnCode
+ * @brief Return code enumeration for function results and error handling.
+ */
+enum class ReturnCode {
+    // General success and error codes
+    SUCCESS = 0,         ///< Operation completed successfully.
+    FAIL = -1,           ///< Operation failed.
+    NOT_SUPPORTED = -2,  ///< Operation not supported.
+    INVALID_PARAM = -3,  ///< Invalid parameters.
+    NOT_INITIALIZED = -4,  ///< Resource not initialized.
+    NOT_FOUND = -5,        ///< Resource not found.
+    NO_RESPONSE = -6,      ///< No response from hardware.
+    BUSY = -7,             ///< Resource is busy.
+    HARDWARE_FAULT = -8,   ///< Hardware reported a specific fault condition.
+
+    // Safe mode condition codes
+    SAFE_MODE = -100,  ///< Generic safe mode condition.
+    SAFE_MODE_POS_BEHIND = -101,  ///< Position safe mode: position behind target.
+    SAFE_MODE_POS_EXCEED = -102,  ///< Position safe mode: position exceeds limits.
+    SAFE_MODE_VEL = -103,  ///< Velocity safe mode: velocity exceeds threshold.
+    SAFE_MODE_TOR = -104,  ///< Torque safe mode: torque exceeds limits.
+    SAFE_MODE_SIG = -105,  ///< Signal safe mode: communication signal loss.
+    SAFE_MODE_TEMPERATURE = -106,  ///< Temperature safe mode: temperature exceeds critical threshold.
+
+    // Special condition codes
+    STALL = -200  ///< Stall condition detected.
+};

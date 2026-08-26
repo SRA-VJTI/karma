@@ -1,0 +1,140 @@
+[build-system]
+requires = ["scikit-build-core>=0.10"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "openpi-control"
+version = "0.1.5"
+description = "OpenPI native control runtime for YAM, ARX, and FR3 robot arms"
+readme = "README.md"
+# Capped below 3.14: trossen-arm is hard-pinned to ==1.10.0 to stay aligned
+# with the C++ libtrossen_arm in scripts/build_deps.sh, and that release
+# only publishes cp311/cp312/cp313 wheels.
+requires-python = ">=3.11,<3.14"
+authors = [{ name = "OpenPI Control maintainers" }]
+dependencies = [
+  "numpy>=1.26",
+  # Direct CAN access for the servo zeroing registry (openpi_control.servos).
+  "python-can>=4.3",
+  "pyzmq>=25",
+  # Trossen iNerve Ethernet controllers: discovery, EEPROM zeroing, and IP
+  # provisioning (openpi_control.servos.trossen_eth). Pinned to the same
+  # release as the C++ libtrossen_arm in scripts/build_deps.sh so the driver
+  # <-> controller firmware compatibility stays aligned.
+  "trossen-arm==1.10.0",
+  # USB-serial bus-servo maintenance sessions (openpi_control.servos.buses)
+  # for the FeeTech/Dynamixel serial families (e.g. SO-ARM101).
+  "pyserial>=3.5",
+]
+
+[project.optional-dependencies]
+dev = [
+  "hypothesis>=6",
+  "pytest>=8",
+  "pytest-cov>=5",
+  "ruff>=0.6",
+]
+# Browser visualization of the packaged models (openpi_control.viz). Kept
+# optional: it pulls trimesh/scipy and is never needed to drive an arm.
+viz = [
+    "viser>=1.0",
+    "yourdfpy>=0.0.56",
+]
+# Reading the cell's RealSense colour streams (openpi_control.cameras).
+# Discovery -- "is the top camera plugged in" -- is stdlib only and needs none
+# of this; capture is what wants the SDK. pyrealsense2 rather than OpenCV's
+# V4L2 path because it is the only one of the two that reaches 30 fps on a
+# D405 (openpi_control.cameras.CameraReader explains the measurement). OpenCV
+# stays for encoding snapshots -- headless, since nothing here opens a window.
+cameras = [
+    "pyrealsense2>=2.55",
+    "opencv-python-headless>=4.10",
+]
+# MolmoAct2's robot-side HTTP client. The GPU model server remains a separate
+# process; this extra only installs what talking to /act needs.
+inference = [
+    # The wire codec: json_numpy is how ndarrays ride a JSON body.
+    "json-numpy>=1.0",
+    # requests, not urllib, because the reference client's keep-alive Session
+    # is part of the runtime being matched -- one TCP connection for every
+    # inference instead of a handshake per call.
+    "requests>=2.31",
+    # Frames go out JPEG-encoded (~25x less payload than raw). Pillow rather
+    # than reusing the `cameras` extra's OpenCV so this extra stays
+    # installable without the RealSense SDK.
+    "pillow>=10",
+]
+# Recording teleop into a LeRobot dataset (openpi_control.record). Split from
+# `cameras` because lerobot drags in torch, which a robot box that only drives
+# arms has no use for.
+lerobot = [
+    "openpi-control[cameras]",
+    # The [dataset] extra is not optional for us: from lerobot 0.6 onwards
+    # importing LeRobotDataset without it raises ImportError for `datasets`,
+    # and LeRobotDataset is the whole point of this extra.
+    #
+    # Marked for 3.12+ because lerobot 0.6 requires it, while this project still
+    # supports 3.11 (trossen-arm publishes cp311 wheels). Without the marker the
+    # resolver fails outright on 3.11 rather than leaving the extra empty, which
+    # would make `uv sync` unusable there even for people who never record.
+    "lerobot[dataset]>=0.6; python_version >= '3.12'",
+]
+# Driving the arms from a Quest headset (openpi_control.teleop_vr). These are
+# vr-teleop-kit's own runtime dependencies -- its IK loads the YAM MJCF through
+# mujoco, and it reaches the relay over a WebSocket -- listed here because the
+# kit is a sibling checkout rather than a package we depend on, so nothing else
+# would install them. The kit itself comes from that checkout (--vr-kit).
+vr = [
+    "mujoco>=3.2",
+    "websockets>=13",
+]
+
+# `uv sync` is an exact sync: it uninstalls whatever is not in the set it was
+# asked for, so `uv sync --extra cameras` used to silently strip the inference
+# and viz extras a live cell had just installed. This group is every extra an
+# operator box actually drives an arm with, and uv installs it on any plain
+# `uv sync` / `uv run`, so no single-extra command can undo the rest of them.
+#
+# A dependency-group rather than another extra on purpose: it is a development
+# and deployment convenience, so it stays out of the published wheel's metadata
+# -- `pip install openpi-control[cameras]` is unaffected by anything here.
+#
+# `lerobot` is deliberately absent: it drags in torch, which is gigabytes a box
+# that only drives arms never loads. Add it per-command when recording; because
+# this group is a default, `--extra lerobot` adds to it instead of replacing it.
+[dependency-groups]
+cell = ["openpi-control[dev,viz,cameras,inference,vr]"]
+
+[tool.uv]
+default-groups = ["cell"]
+
+[project.scripts]
+openpi-control = "openpi_control.cli:main"
+openpi-control-viz = "openpi_control.viz:main"
+
+[tool.scikit-build]
+cmake.version = ">=3.22"
+wheel.py-api = "py3"
+wheel.packages = ["src/openpi_control"]
+wheel.install-dir = ""
+sdist.include = [
+  "native/**",
+  "src/openpi_control/models/**",
+  "src/openpi_control/arm_commands/**",
+  "tests/**",
+  "scripts/**",
+]
+
+[tool.scikit-build.cmake.define]
+OPENPI_CONTROL_BUILD_NATIVE = "ON"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
