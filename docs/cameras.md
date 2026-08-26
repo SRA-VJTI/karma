@@ -25,7 +25,7 @@ at run time:
 | `right_wrist` | D405 | `254623070417` | 848x480@30 | `right` | the same, for the right arm |
 
 The wrist serials are the ones the cell was already using — they match
-`cams.env` in `vr-teleop-kit`. Swap a camera and the one place to edit is
+the serial map in `openpi_control.rigs`. Swap a camera and the one place to edit is
 `YAM_BIMANUAL_CAMERA_SERIALS` in `openpi_control/rigs.py`.
 
 ### The top camera is a D435, and it is not interchangeable

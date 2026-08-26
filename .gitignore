@@ -109,3 +109,16 @@ mlruns/
 .cache/
 tmp/
 temp/
+
+# =========================
+# Quest / robot-local assets
+# =========================
+# The YAM MJCF and gripper XML are supplied by a local i2rt checkout; the
+# vendored teleop runtime only stores the kinematics integration in this repo.
+i2rt/
+certs/
+cams.env
+MUJOCO_LOG.TXT
+MJMODEL.TXT
+MJDATA.TXT
+*.mjb

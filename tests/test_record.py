@@ -21,6 +21,7 @@ from openpi_control.record import (
     DATASET_GRIPPER_OPEN,
     NATIVE_GRIPPER_OPEN,
     ArmTarget,
+    EpisodeControlHints,
     EpisodeEvent,
     HoldSource,
     MemorySink,
@@ -382,6 +383,50 @@ def test_restarting_a_take_discards_the_open_one() -> None:
     assert len(sink.episodes[0]) == 1  # only the restart tick; SAVE closes it
 
 
+def test_quest_episode_messages_are_numbered_and_actionable() -> None:
+    messages: list[str] = []
+    sink = MemorySink()
+
+    record_session(
+        arms={"left": FakeArm()},
+        source=ScriptedSource(
+            [
+                TeleopStep(targets={"left": target()}, event=EpisodeEvent.START),
+                TeleopStep(targets={"left": target()}),
+                TeleopStep(targets={"left": target()}, event=EpisodeEvent.START),
+                TeleopStep(targets={"left": target()}, event=EpisodeEvent.SAVE),
+            ]
+        ),
+        sink=sink,
+        task="t",
+        report=messages.append,
+        episode_controls=EpisodeControlHints(start="Right B", save="Left Y"),
+        **FAST,
+    )
+
+    assert messages[0] == "▶  EPISODE 1 STARTED — RECORDING"
+    assert messages[1] == "   Left Y saves · Right B restarts this episode"
+    assert any(message.startswith("↻  EPISODE 1 RESTARTED") for message in messages)
+    assert any(message.startswith("✓  EPISODE 1 SAVED — 1 frame · ") for message in messages)
+    assert messages[-1] == "○  READY FOR EPISODE 2 — press Right B to start"
+
+
+def test_save_while_idle_tells_the_operator_how_to_start() -> None:
+    messages: list[str] = []
+
+    record_session(
+        arms={"left": FakeArm()},
+        source=ScriptedSource([TeleopStep(event=EpisodeEvent.SAVE)]),
+        sink=MemorySink(),
+        task="t",
+        report=messages.append,
+        episode_controls=EpisodeControlHints(start="Right B", save="Left Y"),
+        **FAST,
+    )
+
+    assert messages == ["!  SAVE IGNORED — no episode is recording; press Right B to start"]
+
+
 def test_saving_an_empty_buffer_leaves_the_episode_open() -> None:
     # LeRobot raises on an empty buffer, and a save pressed before any frame
     # landed is a fumble, not the end of a take. The buffer is genuinely empty
@@ -515,6 +560,40 @@ def test_a_stop_event_set_externally_ends_the_session() -> None:
 
     assert result.frames == 0
     assert sink.finalized
+
+
+def test_a_passive_tick_observer_sees_the_same_states_as_the_recorder() -> None:
+    arm = FakeArm()
+    seen = []
+
+    run(
+        [
+            TeleopStep(targets={"left": target()}, event=EpisodeEvent.START),
+            TeleopStep(targets={"left": target()}, event=EpisodeEvent.SAVE),
+        ],
+        arms={"left": arm},
+        on_tick=lambda states: seen.append(states["left"]),
+    )
+
+    # The scripted source contributes one final STOP iteration, which is still
+    # a real preview tick even though it writes no dataset frame.
+    assert len(seen) == 3
+    assert all(state is not None for state in seen)
+
+
+def test_a_passive_tick_observer_keeps_previewing_during_an_arm_stall() -> None:
+    arm = FakeArm()
+    arm.age_s = 5.0
+    seen = []
+
+    run(
+        [TeleopStep()] * 3,
+        arms={"left": arm},
+        on_tick=lambda states: seen.append(states["left"]),
+        max_stall_s=10.0,
+    )
+
+    assert len(seen) == 4  # three scripted iterations plus the final STOP
 
 
 # --------------------------------------------------------------------------- #

@@ -1,13 +1,14 @@
-"""Driving this cell's arms from a Meta Quest, via ``vr-teleop-kit``.
+"""Drive this cell's arms from a Meta Quest.
 
-``vr-teleop-kit`` already solves the hard half of VR teleoperation -- a WebXR
-relay the headset talks to, clutch-relative pose mapping, and a damped IK solver
-tuned for the YAM's wrist. None of that is reimplemented here. This module is
-the adapter: it turns that project's ``BiQuestTeleoperator`` into a
-:class:`~openpi_control.record.TeleopSource`, so the headset drives arms through
-``openpi_control``'s own native stack rather than through the i2rt driver.
+The vendored :mod:`vr_teleop_kit` package solves the hard half of VR
+teleoperation: the WebXR relay, clutch-relative pose mapping, and a damped IK
+solver tuned for the YAM's wrist. This module is the boundary between that
+package and :mod:`openpi_control`: it turns the Quest action stream into the
+native stack's :class:`~openpi_control.record.TeleopSource` protocol, so the
+headset drives arms through ``pi_control_node`` rather than through the kit's
+optional i2rt example driver.
 
-    vr-teleop-kit relay  <--WebXR--  Quest
+    openpi relay         <--WebXR--  Quest
              |
         BiQuestTeleoperator  (pose mapping + IK)
              |  joint targets
@@ -15,16 +16,10 @@ the adapter: it turns that project's ``BiQuestTeleoperator`` into a
              |  PositionCommand
         FollowerArm -> pi_control_node -> CAN -> YAM
 
-Setup, once
------------
-
-``vr-teleop-kit`` is not a dependency of this package -- it is a sibling
-checkout, because it carries its own relay, its own web assets, and an i2rt
-clone for the YAM MJCF the IK needs. Point ``--vr-kit`` at it (or install it
-into this environment), then run its relay next to this command::
-
-    vr-teleop-relay                 # in the vr-teleop-kit checkout
-    openpi-control record --vr ...  # here
+The YAM MJCF is still supplied by the i2rt model tree because it is a robot
+model asset, not a Python dependency. Set ``YAM_XML`` or place an i2rt checkout
+at ``./i2rt``. ``openpi teleop`` starts the vendored relay and can establish the
+Quest USB tunnel itself.
 
 Three things that will otherwise cost you a session
 ---------------------------------------------------
@@ -96,6 +91,7 @@ class QuestTeleopSource:
         kit_path: Path | None = None,
         model_path: str | None = None,
         connect_timeout_s: float = 5.0,
+        config_overrides: Mapping[str, object] | None = None,
         teleoperator: object | None = None,
     ) -> None:
         """``teleoperator`` injects an already-built (or stand-in) teleoperator.
@@ -118,10 +114,13 @@ class QuestTeleopSource:
             self._teleop = teleoperator
         else:
             teleop_module = _import_vr_kit(kit_path)
-            config_kwargs: dict[str, object] = {
-                "ws_url": ws_url,
-                "connect_timeout_s": connect_timeout_s,
-            }
+            config_kwargs: dict[str, object] = dict(config_overrides or {})
+            config_kwargs.update(
+                {
+                    "ws_url": ws_url,
+                    "connect_timeout_s": connect_timeout_s,
+                }
+            )
             if model_path:
                 config_kwargs["model_path"] = model_path
 
@@ -135,8 +134,7 @@ class QuestTeleopSource:
                 # running, and a bare timeout traceback does not say so.
                 raise ConfigurationError(
                     f"cannot reach the VR relay at {ws_url}: {err}. Start it with "
-                    "`vr-teleop-relay` in the vr-teleop-kit checkout, or point "
-                    "--vr-url at wherever it is listening."
+                    "`openpi relay`, or point --vr-url at wherever it is listening."
                 ) from err
         self._seeded = False
         # Both buttons are reported as levels, so the bridge does its own edge
@@ -155,9 +153,11 @@ class QuestTeleopSource:
         command a move to the folded park pose.
         """
         observation: dict[str, float] = {}
+        missing = []
         for name in self.arm_names:
             state = states.get(name)
             if state is None:
+                missing.append(name)
                 continue
             positions = state.joints.position_rad
             for index in range(min(VR_ARM_DOFS, len(positions))):
@@ -167,10 +167,11 @@ class QuestTeleopSource:
                 # dataset convention, and this reading is native. Numerically
                 # the same flip, but naming the direction is the only thing
                 # keeping either call site readable.
-                observation[f"{name}_gripper.pos"] = to_dataset_gripper(
-                    state.effector.position
-                )
-        if not observation:
+                observation[f"{name}_gripper.pos"] = to_dataset_gripper(state.effector.position)
+        # The solver starts at its configured rest pose. Seeding from only one
+        # side of a bimanual cell would silently leave the other side at rest,
+        # so wait until every selected follower has published a real pose.
+        if missing or not observation:
             return False
         self._teleop.seed_qpos_from_obs(observation)
         self._seeded = True
@@ -185,12 +186,12 @@ class QuestTeleopSource:
 
         event = self._read_event()
         action = self._teleop.get_action()
+        self._publish_effector_feedback(action, states)
         targets: dict[str, ArmTarget] = {}
         for name in self.arm_names:
             try:
                 joints = tuple(
-                    float(action[f"{name}_joint_{index + 1}.pos"])
-                    for index in range(VR_ARM_DOFS)
+                    float(action[f"{name}_joint_{index + 1}.pos"]) for index in range(VR_ARM_DOFS)
                 )
             except KeyError as err:
                 # A partial action is a protocol change, not a transient: better
@@ -205,6 +206,30 @@ class QuestTeleopSource:
                 effector=None if gripper is None else to_native_gripper(gripper),
             )
         return TeleopStep(targets=targets, event=event)
+
+    def _publish_effector_feedback(
+        self, action: Mapping[str, object], states: Mapping[str, ArmState | None]
+    ) -> None:
+        """Feed native gripper effort back to the vendored Quest teleoperator.
+
+        The kit already mixes this signal into its controller haptics. Keeping
+        the conversion here means both ``record`` and the direct ``teleop``
+        command get force feedback without knowing anything about WebXR.
+        """
+        send_feedback = getattr(self._teleop, "send_feedback", None)
+        if not callable(send_feedback):
+            return
+        torques: dict[str, float] = {}
+        for name in self.arm_names:
+            state = states.get(name)
+            if state is None or state.effector is None:
+                continue
+            torques[f"{name}_gripper.torque"] = float(state.effector.effort_nm)
+            key = f"{name}_gripper.pos"
+            if key in action:
+                torques[key] = float(action[key])
+        if torques:
+            send_feedback({"torques": torques})
 
     def _read_event(self) -> EpisodeEvent:
         """Map the two controller buttons to an episode event, on their edges.
@@ -231,12 +256,10 @@ class QuestTeleopSource:
 
 
 def _import_vr_kit(kit_path: Path | None):  # noqa: ANN202 - the module, Any by design
-    """Import ``vr_teleop_kit.lerobot.bi_quest_teleop``, from a checkout if given.
+    """Import the vendored teleoperator, with a legacy checkout escape hatch.
 
-    ``vr-teleop-kit`` is a sibling project rather than a dependency, so a path
-    to its checkout is prepended to ``sys.path`` when one is given. The import
-    error is worth catching because the fix ("point --vr-kit at the checkout")
-    is not obvious from a bare ModuleNotFoundError.
+    ``kit_path`` remains accepted for users migrating from the previous sibling
+    checkout workflow. New sessions import the in-repository package directly.
     """
     if kit_path is not None:
         source = kit_path / "src"
@@ -253,13 +276,11 @@ def _import_vr_kit(kit_path: Path | None):  # noqa: ANN202 - the module, Any by 
         # operator hunting for a checkout they already have.
         if (err.name or "").startswith("vr_teleop_kit"):
             raise ConfigurationError(
-                "VR teleoperation needs vr-teleop-kit, which is not importable: "
-                "pass --vr-kit /path/to/vr-teleop-kit, or install it into this "
-                f"environment. ({err})"
+                "VR teleoperation is not importable. Install the VR extra with "
+                "`uv sync`, then retry."
             ) from err
         raise ConfigurationError(
-            f"vr-teleop-kit was found, but it needs {err.name!r}, which is not "
-            "installed here. Install the VR extra (uv sync --extra vr), or run "
-            f"from an environment that has vr-teleop-kit's dependencies. ({err})"
+            f"the VR teleoperator needs {err.name!r}, which is not installed. "
+            "Install the VR extra with `uv sync`."
         ) from err
     return bi_quest_teleop

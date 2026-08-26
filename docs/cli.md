@@ -12,6 +12,7 @@ is sane, set each servo's firmware zero, and bring a whole rig up and back down.
 | `rollout` | **energizes the bimanual YAM**, records LeRobot v3 episodes, and owns putting it down again |
 | `cameras` | no, unless given `--probe` (which opens camera streams, not the bus) |
 | `record` | **energizes the arms** and teleoperates them, like `live` |
+| `collect` | **energizes selected YAM arm(s)**, Quest-teleoperates them, writes LeRobot v3, and owns putting them down again |
 
 Every command attaches `runlog.setup_run_logging`, so each run leaves a trace
 under `~/openpi-data/logs/runtime/<command>.log`, including native crashes.
@@ -266,7 +267,7 @@ frames captured so far as a partial episode, parks at `home_pos`, and continues
 to the next prompt.
 
 ```bash
-uv sync --extra lerobot
+uv sync
 uv run openpi-control rollout \
     --repo-id Dimios45/openpi-fold-towel-rollout-ablation \
     --root ~/openpi-data/rollouts/fold-towel \
@@ -516,6 +517,29 @@ number `pyrealsense2` reports. See [docs/cameras.md](cameras.md) for that
 distinction, for why the default mode is 848x480, and for why capture goes
 through the RealSense SDK instead of OpenCV.
 
+## teleop
+
+`teleop` drives the YAM follower arms from a Meta Quest. It starts the vendored
+WebXR relay, creates the USB ADB tunnel by default, and owns native arm startup
+and safe shutdown. Use `--arm left` or `--arm right` for a single-arm session:
+
+```bash
+uv run openpi teleop --arm both --open-quest
+uv run openpi teleop --arm right --interface right=can1
+```
+
+The Quest relay is also available independently:
+
+```bash
+uv run openpi relay
+adb reverse tcp:8443 tcp:8443
+```
+
+For direct Wi-Fi access, provide TLS material and use
+`--quest-transport lan --relay-host 0.0.0.0`. The vendored IK exposes its
+damping, reach-limit, gain, and smoothing flags on `teleop`; `YAM_XML` or a
+local `./i2rt` checkout supplies the YAM MJCF.
+
 ## record
 
 Teleoperates a rig from a Quest headset and writes the episodes as a LeRobot
@@ -523,10 +547,10 @@ dataset. Energizes the arms and owns putting them down again, exactly like
 `live`.
 
 ```bash
-uv sync --extra lerobot   # torch, on top of the default set
-vr-teleop-relay                                    # in the vr-teleop-kit checkout
-uv run openpi-control record --repo-id you/task \
-    --task "fold the towel" --num-episodes 20 --vr-kit ~/vr-teleop-kit
+uv sync                   # includes the LeRobot v3 writer
+uv run openpi relay                                    # optional separate relay
+uv run openpi record --repo-id you/task \
+    --task "fold the towel" --num-episodes 20
 ```
 
 Right B starts (or redoes) an episode; left Y saves it. No headset to hand?
@@ -541,3 +565,38 @@ Two details that will cost you data if you do not know them — the gripper
 polarity is **inverted** between this package (1.0 open) and LeRobot (0.0 open),
 and ctrl-c during an open episode discards it. Both, plus the teardown ordering
 and the stall handling, are in [docs/recording.md](recording.md).
+
+## collect
+
+`collect` is the integrated path for normal Quest data collection. Unlike the
+lower-level `record` command, it starts its own relay, configures the Quest USB
+tunnel, shares one camera capture with Quest WebRTC and the dataset, and serves
+a live Viser page with measured arms and recorded camera feeds.
+
+```bash
+uv run openpi collect --arm both --open-quest \
+    --interface left=can_left --interface right=can_right \
+    --format lerobot-v3 \
+    --repo-id you/yam-fold-towel \
+    --task "fold the towel" --num-episodes 20
+```
+
+Open <http://localhost:8080> for Viser. The camera selection follows the arm:
+
+| Selection | State/action | Camera features |
+| --- | --- | --- |
+| `--arm both` | left + right | `top`, `left_wrist`, `right_wrist` |
+| `--arm left` | left | `top`, `left_wrist` |
+| `--arm right` | right | `top`, `right_wrist` |
+
+All image features are RGB video fields under
+`observation.images.<camera>` in a LeRobot v3.0 dataset. The Viser tiles and
+Quest camera bank read those same RealSense readers; neither opens a second
+stream. `--no-viz` disables only Viser, while `--no-cameras` deliberately
+creates a state/action-only collection. Right B starts or restarts an episode;
+left Y saves it.
+
+The USB relay/ADB path is the default. `--quest-transport lan` requires TLS,
+matching `teleop`. `--no-relay` is available for advanced setups, but an
+external relay cannot borrow the collector's readers; use the default
+in-process relay when the Quest should receive the collection camera feeds.

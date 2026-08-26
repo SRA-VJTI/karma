@@ -1,6 +1,7 @@
 # Recording datasets
 
-`openpi-control record` teleoperates a rig and writes what happens to a
+`openpi collect` is the normal integrated workflow; `openpi record` is its
+lower-level recorder. Both teleoperate a rig and write what happens to a
 [LeRobot](https://github.com/huggingface/lerobot) dataset — parquet for state and
 action, one mp4 per camera. Episode control is in the headset, so a session is
 `B … do the task … Y`, repeat.
@@ -10,15 +11,20 @@ extra needs **Python 3.12+**, so on 3.11 it resolves to nothing and `record`
 says so rather than failing obscurely.
 
 ```bash
-uv sync --extra lerobot   # torch, on top of the default set
-vr-teleop-relay                        # in the vr-teleop-kit checkout
-
-uv run openpi-control record \
+uv sync
+uv run openpi collect --arm both --open-quest \
+    --interface left=can_left --interface right=can_right \
+    --format lerobot-v3 \
     --repo-id you/yam-fold-towel \
     --task "fold the towel in half" \
-    --num-episodes 20 \
-    --vr-kit ~/vr-teleop-kit
+    --num-episodes 20
 ```
+
+That one command starts the Quest relay, creates `adb reverse`, shares the
+three selected camera streams with Quest and the writer, and serves Viser at
+<http://localhost:8080>. `--arm left` records left state/action plus `top` and
+`left_wrist`; `--arm right` does the symmetric thing. `--arm both` records the
+head/top camera and both wrist cameras.
 
 | In VR | Does |
 | --- | --- |
@@ -30,15 +36,13 @@ The session ends itself after `--num-episodes` saves, or on ctrl-c.
 
 ## Where the pieces live
 
-VR teleoperation is not reimplemented here. [`vr-teleop-kit`](https://github.com/Dream-Machines-Robotics/vr-teleop-kit)
-already owns the WebXR relay the headset talks to, the clutch-relative pose
-mapping, and a damped IK solver tuned for the YAM's wrist.
-`openpi_control.teleop_vr` is the adapter that turns its `BiQuestTeleoperator`
-into a teleop source, so the headset drives arms through this package's native
-stack:
+The complete VR runtime is vendored in `src/vr_teleop_kit/`. It owns the WebXR
+relay and page, clutch-relative mapping, haptics, YAM IK, and camera publisher.
+`openpi_control.teleop_vr` adapts its `BiQuestTeleoperator` into a teleop
+source, so the headset drives arms through this package's native stack:
 
 ```
-Quest  --WebXR-->  vr-teleop-kit relay
+Quest  --WebXR-->  openpi relay
                           |
                    BiQuestTeleoperator     pose mapping + IK
                           |  joint targets
@@ -47,9 +51,18 @@ Quest  --WebXR-->  vr-teleop-kit relay
                    FollowerArm  ->  pi_control_node  ->  CAN  ->  YAM
 ```
 
-`vr-teleop-kit` is a sibling checkout rather than a dependency — it carries its
-own relay, web assets, and the i2rt clone holding the YAM MJCF the IK loads.
-Point `--vr-kit` at it, or install it into this environment and drop the flag.
+The i2rt checkout holding the YAM MJCF is still site-local. Set `YAM_XML`, or
+place it at `./i2rt/i2rt/robot_models/arm/yam/yam.xml`. `openpi teleop` can
+start the relay and create the Quest USB `adb reverse` tunnel itself:
+
+```bash
+uv run openpi teleop --arm both --open-quest
+uv run openpi teleop --arm left
+```
+
+For Wi-Fi, use `--quest-transport lan`, `--relay-host 0.0.0.0`, and a TLS key
+and certificate. Use `--no-relay` only when another relay process is already
+serving the configured `--vr-url`.
 
 ## Rehearsing without a headset
 
@@ -71,7 +84,7 @@ The ceiling is the cameras, and it is **90 Hz**:
 ```bash
 uv run openpi-control record --fps 90 \
     --repo-id you/yam-fold-towel --task "fold the towel in half" \
-    --vr-kit ~/vr-teleop-kit
+    --num-episodes 20
 ```
 
 `--fps` sets the loop rate, the dataset rate, **and** the camera rate together.
@@ -239,10 +252,11 @@ held by another process does not happen with two arms live.
 | `--fps` | `30` | dataset, control-loop, **and** camera rate. 90 is the ceiling here |
 | `--camera-fps` | `--fps` | run the cameras at a different rate from the loop |
 | `--teleop vr\|hold` | `vr` | `hold` is the headset-free pipeline check |
-| `--only ARM` | — | one arm, which also drops the other wrist camera |
+| `--arm both\|left\|right` | `both` | `collect`: selected arm state/action; one arm keeps top + its wrist |
+| `--only ARM` | — | lower-level `record`: one arm, which also drops the other wrist camera |
 | `--no-cameras` | off | state and action only |
 | `--dry-run` | off | full session, nothing written |
-| `--vr-kit PATH` | — | a `vr-teleop-kit` checkout |
+| `--vr-kit PATH` | — | legacy external checkout; normal runs use the vendored package |
 | `--vr-url` | `ws://127.0.0.1:8443/ws` | the relay |
 | `--yam-xml` | — | YAM MJCF the IK loads, if it is not found automatically |
 | `--push-to-hub` / `--private` | off | upload when the arms are down |
@@ -256,13 +270,18 @@ cell that is merely unchecked.
 Exit status is 1 if no episode was saved, so a wrapper script cannot mistake an
 empty session for a successful one.
 
-## One camera, one consumer
+## One capture, several consumers
 
-A camera streams to one process at a time. **Do not enable the Quest camera
-stream while recording** — the relay would grab the same RealSense and the
-recorder's open fails. If you re-run `record` immediately after a session and see
-`Device or resource busy`, that is the kernel still holding the v4l2 node; the
-reader retries for a few seconds before giving up, so it usually resolves itself.
+A physical camera still streams to one process at a time. `collect` solves that
+at the process boundary: it opens each selected RealSense once through the SDK,
+then lends that same newest-frame reader to LeRobot, Viser, and the in-process
+Quest relay. Quest video can therefore remain enabled while collecting.
+
+The lower-level `record` command plus a separately launched relay cannot share
+reader objects across processes. In that legacy arrangement, leave Quest camera
+video disabled or the two processes can contend for a device. If a re-run sees
+`Device or resource busy`, the reader retries briefly while the kernel releases
+the previous stream.
 
 ## Using the loop yourself
 

@@ -30,6 +30,7 @@ handled; ``docs/recording.md`` collects them for the operator.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -41,7 +42,7 @@ import numpy as np
 from .exceptions import ConfigurationError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
     from .rigs import Rig
@@ -61,6 +62,19 @@ DEFAULT_MAX_STALL_S = 0.5
 # start. A RealSense needs a few hundred ms after its pipeline starts; five
 # seconds means the camera is not working, not that it is slow.
 DEFAULT_CAMERA_WARMUP_S = 5.0
+
+# LeRobot 0.6 asks libsvtav1 for preset 12 by default.  The SVT-AV1 3.0 library
+# bundled with PyAV accepts the value but maps it to preset 10 and prints a
+# warning for every camera at the start of every take.  Request the effective
+# preset directly.  It is also a stable choice across the older SVT builds we
+# support.
+SVT_AV1_PRESET = 10
+
+# SVT writes directly to stderr, outside Python and FFmpeg's logging systems.
+# Level 1 retains encoder errors while removing the multi-line INFO banner.
+# ``setdefault`` below deliberately lets an operator opt back into verbose SVT
+# diagnostics by exporting a different value before starting OpenPI.
+SVT_ERROR_LOG_LEVEL = "1"
 
 # Gripper conventions, plural, because the two worlds this module joins disagree
 # and the inversion has to live in exactly one place or it lives in five.
@@ -111,6 +125,20 @@ class EpisodeEvent(StrEnum):
     DISCARD = "discard"
     #: End the session.
     STOP = "stop"
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodeControlHints:
+    """Operator-facing names for the controls that open and save a take.
+
+    The recording state machine is deliberately input-agnostic, but an
+    interactive session should say exactly what to press next.  Keeping the
+    labels here lets Quest collection print ``Right B`` / ``Left Y`` while
+    policy and scripted recorders retain transport-neutral messages.
+    """
+
+    start: str
+    save: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,6 +394,8 @@ def record_session(
     max_stall_s: float = DEFAULT_MAX_STALL_S,
     camera_warmup_s: float = DEFAULT_CAMERA_WARMUP_S,
     report: object | None = None,
+    on_tick: Callable[[Mapping[str, ArmState | None]], None] | None = None,
+    episode_controls: EpisodeControlHints | None = None,
     finalize: bool = True,
     save_on_interrupt: bool = False,
 ) -> RecordResult:
@@ -392,6 +422,14 @@ def record_session(
     tick through the tick before its SAVE. The tick carrying SAVE is the
     operator reaching for a button rather than doing the task, and it is the
     same boundary vr-teleop-kit's recorder uses.
+
+    ``on_tick`` observes the exact state map used by the recorder on every
+    loop iteration, including stalled iterations. It exists for passive views
+    such as Viser: an observer may draw state and camera previews, but it does
+    not participate in commanding the arms or constructing dataset frames.
+
+    ``episode_controls`` supplies human-readable button names for interactive
+    progress messages. It affects terminal output only, never episode state.
     """
     from .types import PositionCommand
 
@@ -402,7 +440,10 @@ def record_session(
         raise ConfigurationError("recording needs at least one arm")
     cameras = dict(cameras or {})
     stop = stop if stop is not None else threading.Event()
-    say = report or (lambda message: print(f"  {message}"))
+    # Flush each transition immediately.  These messages are operator feedback
+    # for a physical button press, not background diagnostics that can wait in
+    # a redirected stdout buffer.
+    say = report or (lambda message: print(f"  {message}", flush=True))
 
     dofs = {name: _arm_dof(arm) for name, arm in arms.items()}
     # No tick runs until every camera has produced a frame. A camera that is
@@ -415,6 +456,7 @@ def record_session(
 
     recording = False
     frames_in_episode = 0
+    episode_started_at: float | None = None
     total_frames = 0
     discarded = 0
     stalled_ticks = 0
@@ -427,12 +469,31 @@ def record_session(
     # Decided once, not per frame: at 90 Hz this branch runs 270 times a second.
     convert = {name: needs_rgb_conversion(camera) for name, camera in cameras.items()}
 
-    def drop(reason: str) -> None:
+    def episode_label(number: int) -> str:
+        return f"{number}/{num_episodes}" if num_episodes else str(number)
+
+    def elapsed_label(started_at: float | None) -> str:
+        elapsed_s = max(0.0, time.perf_counter() - started_at) if started_at is not None else 0.0
+        if elapsed_s < 60.0:
+            return f"{elapsed_s:.1f} s"
+        minutes, seconds = divmod(int(round(elapsed_s)), 60)
+        return f"{minutes}m {seconds:02d}s"
+
+    def ready_message() -> None:
+        if episode_controls is not None:
+            say(
+                f"○  READY FOR EPISODE {episode_label(sink.num_episodes + 1)}"
+                f" — press {episode_controls.start} to start"
+            )
+
+    def drop(reason: str, *, announce: bool = True) -> None:
         """Throw the open take away. The only place that counts a discard."""
-        nonlocal recording, discarded
+        nonlocal recording, discarded, episode_started_at
         sink.discard_episode()
         recording, discarded = False, discarded + 1
-        say(f"episode discarded: {reason}")
+        episode_started_at = None
+        if announce:
+            say(f"✗  EPISODE DISCARDED — {reason}")
 
     next_tick = time.perf_counter()
     try:
@@ -440,30 +501,60 @@ def record_session(
             states: dict[str, ArmState | None] = {
                 name: getattr(arm, "latest_state", None) for name, arm in arms.items()
             }
+            if on_tick is not None:
+                on_tick(states)
             step = source.poll(states)
 
             if step.event is EpisodeEvent.STOP:
                 ended_by = "source stopped"
                 break
             if step.event is EpisodeEvent.START:
+                episode_number = sink.num_episodes + 1
                 if recording:
                     # Re-pressing start means "that take was no good, again".
-                    drop(f"restarted, {frames_in_episode} frames thrown away")
+                    thrown_away = frames_in_episode
+                    drop("restarted", announce=False)
+                    say(
+                        f"↻  EPISODE {episode_label(episode_number)} RESTARTED"
+                        f" — previous take discarded ({thrown_away} frames)"
+                    )
+                else:
+                    say(f"▶  EPISODE {episode_label(episode_number)} STARTED — RECORDING")
                 recording, frames_in_episode = True, 0
-                say(f"episode {sink.num_episodes} recording")
-            elif step.event is EpisodeEvent.SAVE and recording:
-                if frames_in_episode == 0:
+                episode_started_at = time.perf_counter()
+                if episode_controls is not None:
+                    say(
+                        f"   {episode_controls.save} saves"
+                        f" · {episode_controls.start} restarts this episode"
+                    )
+            elif step.event is EpisodeEvent.SAVE:
+                if not recording:
+                    message = "!  SAVE IGNORED — no episode is recording"
+                    if episode_controls is not None:
+                        message += f"; press {episode_controls.start} to start"
+                    say(message)
+                elif frames_in_episode == 0:
                     # LeRobot raises on saving an empty buffer, and a save
                     # pressed before any frame landed is a fumble, not an end.
-                    say("save with 0 frames — episode stays open")
+                    message = "!  SAVE IGNORED — no frames captured yet; recording continues"
+                    if episode_controls is not None:
+                        message += f"; press {episode_controls.save} again after recording"
+                    say(message)
                 else:
+                    duration = elapsed_label(episode_started_at)
                     sink.save_episode()
                     recording = False
+                    episode_started_at = None
                     total_frames += frames_in_episode
-                    say(f"episode {sink.num_episodes - 1} saved ({frames_in_episode} frames)")
+                    frame_word = "frame" if frames_in_episode == 1 else "frames"
+                    say(
+                        f"✓  EPISODE {episode_label(sink.num_episodes)} SAVED"
+                        f" — {frames_in_episode} {frame_word} · {duration}"
+                    )
                     if num_episodes and sink.num_episodes >= num_episodes:
                         ended_by = f"reached {num_episodes} episode(s)"
                         break
+                    ready_message()
             elif step.event is EpisodeEvent.DISCARD and recording:
                 drop(f"{frames_in_episode} frames thrown away")
 
@@ -508,9 +599,7 @@ def record_session(
                     if image is None:
                         continue
                     last_frames[name] = image
-                    frame[f"observation.images.{name}"] = (
-                        to_rgb(image) if convert[name] else image
-                    )
+                    frame[f"observation.images.{name}"] = to_rgb(image) if convert[name] else image
                 sink.add_frame(frame)
                 frames_in_episode += 1
 
@@ -556,9 +645,7 @@ def _wait(next_tick: float, period: float) -> float:
     return time.perf_counter()
 
 
-def _await_first_frames(
-    cameras: Mapping[str, object], timeout_s: float
-) -> dict[str, np.ndarray]:
+def _await_first_frames(cameras: Mapping[str, object], timeout_s: float) -> dict[str, np.ndarray]:
     """Block until every camera has a frame; return the frames it saw.
 
     Returning them matters: a caller that needs the frame (to read its shape)
@@ -592,9 +679,7 @@ def _await_first_frames(
 
 def _stale_arms(states: Mapping[str, ArmState | None], max_age_s: float) -> list[str]:
     return sorted(
-        name
-        for name, state in states.items()
-        if state is None or not state.is_fresh(max_age_s)
+        name for name, state in states.items() if state is None or not state.is_fresh(max_age_s)
     )
 
 
@@ -634,16 +719,31 @@ class LeRobotSink:
         streaming_encoding: bool = True,
         encoder_queue_maxsize: int = 90,
     ) -> None:
+        uses_videos = any(spec.get("dtype") == "video" for spec in features.values())
+        if uses_videos:
+            # This has to be set before the first encoder instance starts.  A
+            # Python logger level or redirect_stderr cannot catch SVT's native
+            # worker-thread output.
+            os.environ.setdefault("SVT_LOG", SVT_ERROR_LOG_LEVEL)
+
         dataset_module = _require_lerobot()
+        rgb_encoder = None
+        if uses_videos:
+            from lerobot.configs import RGBEncoderConfig
+
+            rgb_encoder = RGBEncoderConfig(preset=SVT_AV1_PRESET)
+
         self.repo_id = repo_id
         self._dataset = dataset_module.LeRobotDataset.create(
             repo_id=repo_id,
             fps=fps,
             root=root,
             robot_type=robot_type,
-            use_videos=any(
-                spec.get("dtype") == "video" for spec in features.values()
-            ),
+            use_videos=uses_videos,
+            # LeRobot's preset 12 is mapped to 10 by bundled SVT-AV1 3.0 and
+            # emits one warning per camera per take.  Passing 10 avoids both
+            # the implicit remapping and its warning.
+            rgb_encoder=rgb_encoder,
             # Streaming encoding, because the alternative does not survive this
             # cell's frame rate. LeRobot's default stages every frame as a PNG
             # and encodes the lot inside save_episode(): at three cameras and
@@ -706,9 +806,7 @@ class LeRobotSink:
         costs a retry and nothing else."""
         if self.num_episodes == 0:
             raise ConfigurationError("nothing to push: no episode was saved")
-        self._dataset.push_to_hub(
-            private=private, tags=["robotics", "lerobot", "openpi-control"]
-        )
+        self._dataset.push_to_hub(private=private, tags=["robotics", "lerobot", "openpi-control"])
 
 
 class MemorySink:
@@ -857,6 +955,11 @@ def camera_shapes(
 def rig_robot_type(rig: Rig) -> str:
     """A stable ``robot_type`` string for the dataset metadata."""
     return rig.name if len(rig.arms) > 1 else f"{rig.name}_{rig.arms[0].name}"
+
+
+def require_lerobot() -> None:
+    """Validate the LeRobot v3 writer before a hardware session starts."""
+    _require_lerobot()
 
 
 def _require_lerobot():  # noqa: ANN202 - the lerobot dataset module, Any by design

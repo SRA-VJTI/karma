@@ -35,6 +35,10 @@ Commands aimed at the jobs around making an arm usable:
     Ctrl-C-interrupted episode as LeRobot v3, and collect a terminal
     success/failure label for each attempt.
 
+``collect``
+    Quest-teleoperate one or both YAM arms into LeRobot v3 while the selected
+    camera streams are shared with Viser and the in-process Quest relay.
+
 All of them attach :func:`openpi_control.runlog.setup_run_logging`, so every run
 leaves a trace under ``~/openpi-data/logs/runtime/``.
 """
@@ -43,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -94,7 +99,7 @@ from .rigs import Rig, RigArm, resolve_rig, rig_names
 from .servos import SERVO_ZERO_DRIVERS, buses
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from .arms import FollowerArm, LeaderArm
     from .backend import ArmBackend
@@ -306,9 +311,11 @@ def run_doctor(
     read_only = [entry for entry in plan if entry.read_only]
     detail = f"{len(plan)} servos, all models known"
     if read_only:
-        detail += f" ({len(read_only)} read-only: " + ", ".join(
-            f"joint {entry.joint_id}" for entry in read_only
-        ) + ")"
+        detail += (
+            f" ({len(read_only)} read-only: "
+            + ", ".join(f"joint {entry.joint_id}" for entry in read_only)
+            + ")"
+        )
     results.append(CheckResult(_OK, "servo registry", detail))
 
     try:
@@ -317,9 +324,7 @@ def run_doctor(
         results.append(CheckResult(_FAIL, "bus type", str(err)))
         return results
     if port_type is None:
-        results.append(
-            CheckResult(_WARN, "bus type", "every servo is read-only; nothing to zero")
-        )
+        results.append(CheckResult(_WARN, "bus type", "every servo is read-only; nothing to zero"))
         return results
     results.append(CheckResult(_OK, "bus type", port_type))
 
@@ -409,9 +414,7 @@ def _probe_bus(
     """Open the bus and listen. Reads only — never sends."""
     expected = tuple(entry.servo_id for entry in writable)
     try:
-        with buses.open_bus(
-            port_type, interface, baudrate=_catalog_baudrate(model_config)
-        ) as bus:
+        with buses.open_bus(port_type, interface, baudrate=_catalog_baudrate(model_config)) as bus:
             if port_type != buses.PORT_TYPE_CAN:
                 return CheckResult(_OK, "bus probe", f"{port_type} session opened")
             answered = buses.recv_from(bus, expected, _PROBE_WINDOW_S)
@@ -556,9 +559,7 @@ def probe_cameras(
     for camera in rig.cameras:
         found = discovery.matched.get(camera.name)
         if found is None:
-            results.append(
-                CheckResult(_WARN, f"probe {camera.name}", "no device; nothing to open")
-            )
+            results.append(CheckResult(_WARN, f"probe {camera.name}", "no device; nothing to open"))
             continue
         try:
             with cameras_mod.CameraReader(found.spec()) as reader:
@@ -581,12 +582,8 @@ def probe_cameras(
                 if newest is not None:
                     frame = newest
                 height, width = frame.shape[:2]
-                detail = (
-                    f"{width}x{height} {fourcc}, {measured:.0f} fps (asked {camera.fps})"
-                )
-                status = (
-                    _OK if measured >= camera.fps * _CAMERA_FPS_TOLERANCE else _WARN
-                )
+                detail = f"{width}x{height} {fourcc}, {measured:.0f} fps (asked {camera.fps})"
+                status = _OK if measured >= camera.fps * _CAMERA_FPS_TOLERANCE else _WARN
                 if snapshot_dir is not None:
                     path = snapshot_dir / f"{camera.name}.png"
                     cameras_mod.write_snapshot(path, frame)
@@ -937,9 +934,7 @@ def run_live(
         if control and scene is not None:
             from .viser_control import RigControlPanel
 
-            followers = {
-                entry.name: entry.arm for entry in live_arms if entry.rig_arm.is_follower
-            }
+            followers = {entry.name: entry.arm for entry in live_arms if entry.rig_arm.is_follower}
             panel = RigControlPanel(scene, followers, float_mode=float_mode)  # type: ignore[arg-type]
             print(f"  control  {', '.join(followers)} — disarmed; arm each one in the browser")
         if camera_readers and scene is not None:
@@ -1117,9 +1112,7 @@ def run_infer(
 
             scene = ArmSceneVisualizer.from_rig(rig, mesh_dir=mesh_dir, port=port)
         camera_readers = open_inference_cameras(capture_rig, overrides=camera_overrides)
-        session, live_arms = power_up(
-            rig, float_mode=False, backend_factory=backend_factory
-        )
+        session, live_arms = power_up(rig, float_mode=False, backend_factory=backend_factory)
         arm_map = {entry.name: entry.arm for entry in live_arms}
         limits = {
             name: (
@@ -1228,9 +1221,7 @@ def run_infer(
                 if int(getattr(client, "jpeg_quality", 0)) <= 0:
                     raise
                 print(f"  frames   {err}", file=sys.stderr)
-                print(
-                    "  frames   sending raw frames for the rest of the run", file=sys.stderr
-                )
+                print("  frames   sending raw frames for the rest of the run", file=sys.stderr)
                 client.jpeg_quality = 0
                 if prefetcher is not None:
                     prefetcher.drop()
@@ -1283,8 +1274,7 @@ def run_infer(
                 # was *not* refused the arms failed to reach. A low clamp count
                 # beside a large lag is hardware that cannot keep up with the
                 # plan, and no clamp setting fixes that -- `--speed` does.
-                f"lag {last_lag:.3f}"
-                + (f"  grip {reading}" if reading else ""),
+                f"lag {last_lag:.3f}" + (f"  grip {reading}" if reading else ""),
                 flush=True,
             )
             clamped_before = clamped_now
@@ -1347,9 +1337,7 @@ def run_infer(
                     # takes, so the next chunk lands just as this one runs out.
                     queued_s = (len(plan) - index - 1) * period
                     if queued_s <= prefetcher.latency_s + prefetch_margin_s:
-                        prefetcher.submit(
-                            build_observation(arm_map, camera_readers), instruction
-                        )
+                        prefetcher.submit(build_observation(arm_map, camera_readers), instruction)
                 remaining = period - (time.monotonic() - tick_start)
                 if remaining > 0:
                     stop.wait(remaining)
@@ -1420,9 +1408,7 @@ def run_rollout(
     from . import record as record_mod
 
     if tuple(rig.names) != ("left", "right"):
-        raise ConfigurationError(
-            "policy rollouts require the packaged bimanual left/right YAM rig"
-        )
+        raise ConfigurationError("policy rollouts require the packaged bimanual left/right YAM rig")
     if episodes <= 0:
         raise ConfigurationError("--episodes must be positive")
     if episode_seconds <= 0:
@@ -1459,9 +1445,7 @@ def run_rollout(
         "repo_id": repo_id,
         "instruction_is_per_episode": True,
         "speed": speed,
-        "chunk_size": (
-            chunk_size if chunk_size is not None else MOLMOACT_ACTION_HORIZON
-        ),
+        "chunk_size": (chunk_size if chunk_size is not None else MOLMOACT_ACTION_HORIZON),
         "episode_seconds": episode_seconds,
         "fps": fps,
         "partial_episodes_saved_on_ctrl_c": True,
@@ -1472,9 +1456,7 @@ def run_rollout(
     try:
         cameras = open_inference_cameras(capture_rig, overrides=camera_overrides)
         shapes = record_mod.camera_shapes(cameras)
-        state_names = record_mod.arm_feature_names(
-            ["left", "right"], {"left": 6, "right": 6}
-        )
+        state_names = record_mod.arm_feature_names(["left", "right"], {"left": 6, "right": 6})
         features = record_mod.build_features(state_names, shapes)
         sink = record_mod.LeRobotSink(
             repo_id=repo_id,
@@ -1491,9 +1473,7 @@ def run_rollout(
             from .viz import ArmSceneVisualizer, CameraPanel
 
             scene = ArmSceneVisualizer.from_rig(rig, mesh_dir=mesh_dir, port=port)
-            camera_panel = CameraPanel(
-                scene.server, cameras, folder="Policy input", max_width=None
-            )
+            camera_panel = CameraPanel(scene.server, cameras, folder="Policy input", max_width=None)
             print(f"  viser    {scene.url}")
 
         for episode_index in range(1, episodes + 1):
@@ -1507,7 +1487,7 @@ def run_rollout(
             session = None
             live_arms: list[LiveArm] = []
             source: InferenceRolloutSource | None = None
-            saved_before = getattr(sink, "num_episodes")
+            saved_before = sink.num_episodes
             episode_result = None
             park_failures = 0
             try:
@@ -1517,14 +1497,10 @@ def run_rollout(
                 arm_map = {entry.name: entry.arm for entry in live_arms}
                 limits = {
                     name: (
-                        np.array(
-                            [spec.lower for spec in scene[name].joint_specs], dtype=np.float64
-                        )
+                        np.array([spec.lower for spec in scene[name].joint_specs], dtype=np.float64)
                         if scene is not None
                         else np.full(6, -np.inf),
-                        np.array(
-                            [spec.upper for spec in scene[name].joint_specs], dtype=np.float64
-                        )
+                        np.array([spec.upper for spec in scene[name].joint_specs], dtype=np.float64)
                         if scene is not None
                         else np.full(6, np.inf),
                     )
@@ -1587,23 +1563,20 @@ def run_rollout(
 
             if park_failures:
                 print(
-                    f"  {park_failures} arm(s) failed to park; stopping before the "
-                    "next episode",
+                    f"  {park_failures} arm(s) failed to park; stopping before the next episode",
                     file=sys.stderr,
                 )
                 status = 1
                 break
 
-            saved = getattr(sink, "num_episodes") > saved_before
+            saved = sink.num_episodes > saved_before
             aborted = episode_result is not None and episode_result.ended_by == "interrupted"
             if aborted:
                 if saved:
                     print("  episode interrupted; partial frames were saved")
                 else:
                     print("  episode interrupted before a frame was captured")
-            success = _rollout_yes_no(
-                input_fn, f"Episode {episode_index} successful? [y/n]: "
-            )
+            success = _rollout_yes_no(input_fn, f"Episode {episode_index} successful? [y/n]: ")
             if not saved:
                 print("  no LeRobot episode was written for this attempt")
             entries = manifest["episodes"]
@@ -1664,6 +1637,117 @@ def _write_rollout_manifest(path: Path, manifest: Mapping[str, object]) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _command_collect(args: argparse.Namespace, log_path: Path) -> int:
+    """Run the integrated Quest + LeRobot v3 + Viser collection workflow."""
+    if not args.dry_run and not args.repo_id:
+        raise ConfigurationError(
+            "collect needs --repo-id (e.g. you/yam-fold-towel), or --dry-run "
+            "to rehearse without writing a dataset"
+        )
+    if args.fps <= 0:
+        raise ConfigurationError(f"--fps must be positive, got {args.fps}")
+    if args.camera_fps is not None and args.camera_fps <= 0:
+        raise ConfigurationError(f"--camera-fps must be positive, got {args.camera_fps}")
+    if args.port <= 0 or args.port > 65535:
+        raise ConfigurationError(f"--port must be between 1 and 65535, got {args.port}")
+    if args.relay_port <= 0 or args.relay_port > 65535:
+        raise ConfigurationError(f"--relay-port must be between 1 and 65535, got {args.relay_port}")
+    if args.quest_transport == "lan" and args.open_quest:
+        raise ConfigurationError("--open-quest is only available with --quest-transport usb")
+    if args.quest_transport == "lan" and not args.no_relay:
+        if not (args.ssl_keyfile and args.ssl_certfile):
+            raise ConfigurationError(
+                "LAN Quest WebXR needs TLS; provide --ssl-keyfile and --ssl-certfile, "
+                "or use --quest-transport usb"
+            )
+
+    overrides = cameras_mod.parse_camera_overrides(args.camera)
+    rig = resolve_rig(args.rig).with_interfaces(_parse_interface_overrides(args.interface))
+    if args.arm != "both":
+        rig = rig.subset([args.arm])
+    if any(arm.model != "Yam" or arm.name not in {"left", "right"} for arm in rig.arms):
+        raise ConfigurationError(
+            "Quest collection currently supports left/right YAM follower arms only"
+        )
+    if not args.cameras_enabled:
+        rig = rig.without_cameras()
+    rig = rig.with_camera_capture(
+        fps=args.camera_fps or args.fps,
+        # One RGB capture is handed straight to LeRobot, Viser, and WebRTC.
+        # This avoids a three-frame channel swap in the Python record loop.
+        pixel_format="rgb8",
+    )
+
+    task = args.task or "teleop"
+    if not args.task:
+        print(
+            "warning: no --task given; every frame will say 'teleop'",
+            file=sys.stderr,
+        )
+
+    print(f"collect: rig {rig.name} — {rig.description}")
+    print(f"  format   LeRobot v3.0 ({args.dataset_format})")
+    for rig_arm in rig.arms:
+        print(f"  {rig_arm.name:<8} {rig_arm.model:<6} {rig_arm.interface}")
+    print(f"  views    {', '.join(rig.camera_names) if rig.cameras else 'state/action only'}")
+
+    if not args.skip_preflight:
+        failures, reports = preflight_rig(rig)
+        camera_results = run_camera_checks(rig, overrides=overrides, required=True)
+        camera_results += check_camera_modes(rig)
+        failures += sum(1 for result in camera_results if result.status == _FAIL)
+        for name, results in reports:
+            problems = [result for result in results if result.status != _OK]
+            if problems:
+                print(f"\npreflight {name}:")
+                for result in problems:
+                    print(result.render())
+        camera_problems = [result for result in camera_results if result.status != _OK]
+        if camera_problems:
+            print("\npreflight cameras:")
+            for result in camera_problems:
+                print(result.render())
+        if failures:
+            print(
+                f"\n{failures} failed check(s); nothing was energized. "
+                "Fix them, or re-run with --skip-preflight.",
+                file=sys.stderr,
+            )
+            return 1
+
+    print()
+    status = run_collect(
+        rig,
+        task=task,
+        repo_id=args.repo_id,
+        dataset_format=args.dataset_format,
+        fps=args.fps,
+        num_episodes=args.num_episodes,
+        root=args.root,
+        dry_run=args.dry_run,
+        park=args.park,
+        push_to_hub=args.push_to_hub,
+        private=args.private,
+        camera_overrides=overrides,
+        vr_url=args.vr_url,
+        yam_xml=args.yam_xml,
+        visualize=args.visualize,
+        port=args.port,
+        mesh_dir=args.mesh_dir,
+        quest_transport=args.quest_transport,
+        adb_serial=args.adb_serial,
+        open_quest=args.open_quest,
+        start_relay=not args.no_relay,
+        relay_host=args.relay_host,
+        relay_port=args.relay_port,
+        ssl_keyfile=args.ssl_keyfile,
+        ssl_certfile=args.ssl_certfile,
+        quest_url=args.quest_url,
+    )
+    print(f"log: {log_path}")
+    return status
+
+
 def run_record(
     rig: Rig,
     *,
@@ -1679,9 +1763,13 @@ def run_record(
     push_to_hub: bool = False,
     private: bool = False,
     camera_overrides: dict[str, str] | None = None,
+    camera_readers: Mapping[str, object] | None = None,
     vr_url: str | None = None,
     vr_kit: Path | None = None,
     yam_xml: str | None = None,
+    visualize: bool = False,
+    port: int = 8080,
+    mesh_dir: Path | None = None,
     backend_factory: Callable[[RigArm], ArmBackend] | None = None,
     stop: threading.Event | None = None,
 ) -> int:
@@ -1698,11 +1786,18 @@ def run_record(
     from . import record as record_mod
 
     stop = stop if stop is not None else threading.Event()
-    cameras: dict[str, object] = {}
+    cameras: dict[str, object] = dict(camera_readers or {})
+    owns_cameras = camera_readers is None
+
+    # Fail before cameras, relays, or motors are opened. Importing LeRobot is
+    # cheap compared with discovering this only after a hardware session is
+    # live, and it gives ``collect`` an actionable installation error.
+    if not dry_run:
+        record_mod.require_lerobot()
 
     # Cameras first: they need no motors, and finding out now that a camera is
     # held by another process beats finding out with two arms energized.
-    if rig.cameras:
+    if owns_cameras and rig.cameras:
         discovery = cameras_mod.discover(rig.cameras, overrides=camera_overrides)
         if not discovery.complete:
             missing = ", ".join(
@@ -1716,9 +1811,23 @@ def run_record(
     session = None
     live_arms: list[LiveArm] = []
     source = None
+    scene = None
+    camera_panel = None
     status = 0
     try:
         shapes = record_mod.camera_shapes(cameras)
+
+        if visualize:
+            from .viz import ArmSceneVisualizer, CameraPanel
+
+            scene = ArmSceneVisualizer.from_rig(rig, mesh_dir=mesh_dir, port=port)
+            camera_panel = CameraPanel(
+                scene.server,
+                cameras,
+                folder="Recorded cameras",
+                max_width=None,
+            )
+            print(f"  viser    {scene.url}")
 
         session, live_arms = power_up(rig, float_mode=False, backend_factory=backend_factory)
         # Followers only. A leader has no `command`, so handing one to the record
@@ -1726,9 +1835,7 @@ def run_record(
         # not what the dataset is about anyway.
         arms = {entry.name: entry.arm for entry in live_arms if entry.rig_arm.is_follower}
         if not arms:
-            raise ConfigurationError(
-                f"rig {rig.name!r} has no follower arms to record from"
-            )
+            raise ConfigurationError(f"rig {rig.name!r} has no follower arms to record from")
         for entry in live_arms:
             print(
                 f"  {entry.name:<8} {entry.rig_arm.model} on {entry.rig_arm.interface}"
@@ -1767,9 +1874,20 @@ def run_record(
         print(f"  task     {task!r}")
         print()
         if teleop == "vr":
-            print("  right B: start (or redo) an episode    left Y: save it")
+            print("  EPISODE CONTROLS")
+            print("    Right B   start / restart the current episode")
+            print("    Left Y    save the current episode")
+            print("    ○  READY FOR EPISODE 1 — press Right B to start")
         print(f"  ctrl-c to {'park and ' if park else ''}power down")
         print()
+
+        def update_visualization(states: Mapping[str, object | None]) -> None:
+            if scene is not None:
+                for name, state in states.items():
+                    if state is not None:
+                        scene.update(name, state.joints.position_rad)  # type: ignore[union-attr]
+            if camera_panel is not None:
+                camera_panel.step(1.0 / fps)
 
         result = record_mod.record_session(
             arms=arms,
@@ -1780,6 +1898,12 @@ def run_record(
             fps=fps,
             num_episodes=num_episodes,
             stop=stop,
+            on_tick=update_visualization if scene is not None else None,
+            episode_controls=(
+                record_mod.EpisodeControlHints(start="Right B", save="Left Y")
+                if teleop == "vr"
+                else None
+            ),
         )
         print(f"\n{result.summary()}")
         if result.episodes == 0:
@@ -1788,7 +1912,10 @@ def run_record(
     finally:
         if source is not None:
             source.close()
-        cameras_mod.close_readers(cameras)  # type: ignore[arg-type]
+        if owns_cameras:
+            cameras_mod.close_readers(cameras)  # type: ignore[arg-type]
+        if scene is not None:
+            scene.server.stop()
         if session is not None:
             failures = power_down(session, live_arms, park=park)
             status = status or (1 if failures else 0)
@@ -1804,6 +1931,130 @@ def run_record(
         else:
             print(f"pushed: https://huggingface.co/datasets/{repo_id}")
     return status
+
+
+def run_collect(
+    rig: Rig,
+    *,
+    task: str,
+    repo_id: str | None,
+    dataset_format: str = "lerobot-v3",
+    fps: int = 30,
+    num_episodes: int = 0,
+    root: Path | None = None,
+    dry_run: bool = False,
+    park: bool = True,
+    push_to_hub: bool = False,
+    private: bool = False,
+    camera_overrides: dict[str, str] | None = None,
+    vr_url: str | None = None,
+    yam_xml: str | None = None,
+    visualize: bool = True,
+    port: int = 8080,
+    mesh_dir: Path | None = None,
+    quest_transport: str = "usb",
+    adb_serial: str | None = None,
+    open_quest: bool = False,
+    start_relay: bool = True,
+    relay_host: str = "127.0.0.1",
+    relay_port: int = 8443,
+    ssl_keyfile: str | None = None,
+    ssl_certfile: str | None = None,
+    quest_url: str | None = None,
+    backend_factory: Callable[[RigArm], ArmBackend] | None = None,
+    stop: threading.Event | None = None,
+) -> int:
+    """Collect Quest demonstrations with one shared camera capture.
+
+    The RealSense readers are opened before the relay, Viser, dataset writer,
+    or motors. Those readers are then lent to every passive consumer: LeRobot
+    records them, Viser previews them, and the in-process relay publishes them
+    to the Quest over WebRTC. No device is opened twice.
+    """
+    from . import record as record_mod
+    from .quest import QuestAdbTunnel, QuestRelay
+
+    if dataset_format != "lerobot-v3":
+        raise ConfigurationError(f"collect supports LeRobot v3 only, not {dataset_format!r}")
+    if not dry_run:
+        record_mod.require_lerobot()
+
+    cameras: dict[str, cameras_mod.CameraReader] = {}
+    relay: QuestRelay | None = None
+    adb: QuestAdbTunnel | None = None
+    try:
+        if rig.cameras:
+            discovery = cameras_mod.discover(rig.cameras, overrides=camera_overrides)
+            if not discovery.complete:
+                missing = ", ".join(
+                    f"{name} (serial {serial})" for name, serial in discovery.missing.items()
+                )
+                raise ConfigurationError(
+                    f"camera(s) not on the bus: {missing}; collection requires every selected view"
+                )
+            cameras = cameras_mod.open_readers(discovery.specs())
+            print(f"  cameras  {', '.join(cameras)} — shared by dataset, Viser, and Quest")
+
+        host = relay_host
+        if quest_transport == "lan" and host == "127.0.0.1":
+            host = "0.0.0.0"
+        if start_relay:
+            relay = QuestRelay(
+                host=host,
+                port=relay_port,
+                ssl_keyfile=ssl_keyfile,
+                ssl_certfile=ssl_certfile,
+                camera_readers=cameras,
+            )
+            relay.start()
+            if quest_transport == "usb":
+                print(f"  relay    {relay.page_url} (shared camera publisher)")
+            else:
+                print(f"  relay    open https://<workstation-ip>:{relay_port}/ in the Quest")
+
+        if quest_transport == "usb":
+            adb = QuestAdbTunnel(port=relay_port, serial=adb_serial)
+            serial = adb.connect()
+            print(f"  quest    USB tunnel ready ({serial})")
+            if open_quest:
+                scheme = "https" if ssl_keyfile or ssl_certfile else "http"
+                page_url = quest_url or (
+                    relay.page_url if relay is not None else f"{scheme}://localhost:{relay_port}/"
+                )
+                adb.open_page(page_url)
+                print(f"  quest    opened {page_url}")
+        elif quest_url:
+            print(f"  quest    open {quest_url}")
+
+        scheme = "wss" if ssl_keyfile or ssl_certfile else "ws"
+        source_url = vr_url or f"{scheme}://127.0.0.1:{relay_port}/ws"
+        return run_record(
+            rig,
+            task=task,
+            repo_id=repo_id,
+            teleop="vr",
+            fps=fps,
+            num_episodes=num_episodes,
+            root=root,
+            dry_run=dry_run,
+            park=park,
+            push_to_hub=push_to_hub,
+            private=private,
+            camera_readers=cameras,
+            vr_url=source_url,
+            yam_xml=yam_xml,
+            visualize=visualize,
+            port=port,
+            mesh_dir=mesh_dir,
+            backend_factory=backend_factory,
+            stop=stop,
+        )
+    finally:
+        if adb is not None:
+            adb.close()
+        if relay is not None:
+            relay.stop()
+        cameras_mod.close_readers(cameras)
 
 
 def _build_teleop_source(
@@ -1837,9 +2088,7 @@ def _build_teleop_source(
 
 
 def _add_common(parser: argparse.ArgumentParser, *, required: bool = True) -> None:
-    parser.add_argument(
-        "--model", required=required, help=f"one of: {', '.join(SUPPORTED_MODELS)}"
-    )
+    parser.add_argument("--model", required=required, help=f"one of: {', '.join(SUPPORTED_MODELS)}")
     parser.add_argument(
         "--interface",
         required=required,
@@ -1850,9 +2099,75 @@ def _add_common(parser: argparse.ArgumentParser, *, required: bool = True) -> No
     )
 
 
+_TELEOP_IK_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("--lam", "lam", "position-solve base damping"),
+    ("--lam0", "lam0", "adaptive position damping near a singularity"),
+    ("--w0", "w0", "position manipulability threshold"),
+    ("--mu", "mu", "rest-pose bias stiffness"),
+    ("--lam-rot", "lam_rot", "orientation-solve base damping"),
+    ("--lam0-rot", "lam0_rot", "extra wrist damping near gimbal lock"),
+    ("--w0-rot", "w0_rot", "wrist manipulability threshold"),
+    ("--rot-reach", "rot_reach_limit", "orientation reach-ahead limit in radians; 0 disables"),
+    ("--pos-reach", "pos_reach_limit", "position reach-ahead limit in metres; 0 disables"),
+    ("--rot-err-hold", "rot_err_hold", "park the wrist above this orientation error in radians"),
+    ("--scale-translation", "scale_translation", "controller-to-EE translation gain"),
+    ("--scale-rotation", "scale_rotation", "controller-to-EE rotation gain"),
+    ("--pose-filter-alpha", "pose_filter_alpha", "controller-pose EMA alpha; 1 disables smoothing"),
+)
+
+
+def _add_teleop_ik_args(parser: argparse.ArgumentParser) -> None:
+    for flag, dest, help_text in _TELEOP_IK_FIELDS:
+        parser.add_argument(flag, dest=dest, type=float, default=None, help=help_text)
+    parser.add_argument(
+        "--precision-factor",
+        type=float,
+        default=None,
+        help="A/X precision-button multiplier for translation and rotation gains",
+    )
+    parser.add_argument(
+        "--max-dq-pos",
+        type=float,
+        default=None,
+        help="per-tick joint delta cap for joints 1-3 in radians",
+    )
+    parser.add_argument(
+        "--max-dq-rot",
+        type=float,
+        default=None,
+        help="per-tick joint delta cap for joints 4-6 in radians",
+    )
+    parser.add_argument(
+        "--rest-ramp-duration",
+        type=float,
+        default=None,
+        help="seconds for the thumbstick-click return-to-rest ramp",
+    )
+
+
+def _parse_rest_pose(raw: str | None, *, env_var: str) -> list[float] | None:
+    """Parse a six/seven-value YAM rest pose, including the kit's env format."""
+    value = raw if raw is not None else os.environ.get(env_var)
+    if not value or not value.strip():
+        return None
+    try:
+        parts = [float(item.strip()) for item in value.split(",") if item.strip()]
+    except ValueError as err:
+        raise ConfigurationError(
+            f"{env_var} / rest pose must contain comma-separated numbers, got {value!r}"
+        ) from err
+    if len(parts) not in (6, 7):
+        raise ConfigurationError(
+            f"{env_var} / rest pose must contain 6 joints or 7 values including gripper; "
+            f"got {len(parts)}"
+        )
+    return parts[:6]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="openpi-control", description="Preflight and maintenance for a connected arm."
+        prog="openpi",
+        description="Preflight, control, inference, and teleoperation for a robot cell.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1897,9 +2212,7 @@ def main(argv: list[str] | None = None) -> int:
     live = sub.add_parser(
         "live", help="energize a rig, mirror it in the browser, then park it and power down"
     )
-    live.add_argument(
-        "--rig", default="yam_bimanual", help=f"one of: {', '.join(rig_names())}"
-    )
+    live.add_argument("--rig", default="yam_bimanual", help=f"one of: {', '.join(rig_names())}")
     live.add_argument(
         "--only",
         action="append",
@@ -1958,13 +2271,126 @@ def main(argv: list[str] | None = None) -> int:
     )
     live.add_argument("--list", action="store_true", help="describe the rig and exit")
 
+    teleop = sub.add_parser(
+        "teleop",
+        help="drive a YAM follower from a Meta Quest using the vendored VR stack",
+    )
+    teleop.add_argument("--rig", default="yam_bimanual", help=f"one of: {', '.join(rig_names())}")
+    teleop.add_argument(
+        "--arm",
+        choices=("both", "left", "right"),
+        default="both",
+        help="drive both arms or only one Quest hand (default: both)",
+    )
+    teleop.add_argument(
+        "--interface",
+        action="append",
+        metavar="ARM=IFACE",
+        help="move one arm to a different bus, e.g. --interface left=can2 (repeatable)",
+    )
+    teleop.add_argument(
+        "--rate",
+        type=float,
+        default=200.0,
+        help="native command and IK rate in Hz (default: 200)",
+    )
+    teleop.add_argument(
+        "--vr-url",
+        default=None,
+        help="relay WebSocket URL; defaults to the local relay started by this command",
+    )
+    teleop.add_argument(
+        "--yam-xml",
+        default=None,
+        help="YAM MJCF path; otherwise use YAM_XML or ./i2rt/.../yam.xml",
+    )
+    teleop.add_argument(
+        "--teleop-id", default="openpi-teleop", help="id included in relay ik_state messages"
+    )
+    teleop.add_argument(
+        "--rest-pose-left",
+        default=None,
+        metavar="Q1,...,Q6[,GRIP]",
+        help="left IK rest pose; six or seven comma-separated values",
+    )
+    teleop.add_argument(
+        "--rest-pose-right",
+        default=None,
+        metavar="Q1,...,Q6[,GRIP]",
+        help="right IK rest pose; six or seven comma-separated values",
+    )
+    teleop.add_argument(
+        "--no-park",
+        dest="park",
+        action="store_false",
+        help="de-energize where the arms stand instead of parking them",
+    )
+    teleop.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="energize without running the doctor checks first",
+    )
+    teleop.add_argument(
+        "--state-timeout",
+        type=float,
+        default=0.25,
+        help="maximum age of a native arm state before commands pause (seconds)",
+    )
+    teleop.add_argument(
+        "--quest-transport",
+        choices=("usb", "lan"),
+        default="usb",
+        help="Quest connection: usb creates adb reverse; lan uses direct browser access",
+    )
+    teleop.add_argument(
+        "--adb-serial", default=None, help="ADB serial when more than one device is connected"
+    )
+    teleop.add_argument(
+        "--open-quest",
+        action="store_true",
+        help="open the relay page in the Quest browser after creating the USB tunnel",
+    )
+    teleop.add_argument(
+        "--no-relay",
+        action="store_true",
+        help="use an already-running relay instead of starting one in this process",
+    )
+    teleop.add_argument(
+        "--relay-host", default="127.0.0.1", help="relay bind address (default: 127.0.0.1)"
+    )
+    teleop.add_argument("--relay-port", type=int, default=8443, help="relay port (default: 8443)")
+    teleop.add_argument("--ssl-keyfile", default=None, help="relay TLS private key (PEM)")
+    teleop.add_argument("--ssl-certfile", default=None, help="relay TLS certificate (PEM)")
+    teleop.add_argument(
+        "--quest-url",
+        default=None,
+        help="browser URL for --open-quest; defaults to the local relay page",
+    )
+    teleop.add_argument(
+        "--no-ik-state",
+        action="store_true",
+        help="do not broadcast calculated qpos/haptics back to the Quest page",
+    )
+    teleop.add_argument(
+        "--no-force-haptics",
+        action="store_true",
+        help="disable effort-based gripper vibration while keeping IK haptics",
+    )
+    _add_teleop_ik_args(teleop)
+
+    relay = sub.add_parser(
+        "relay", help="run the vendored Quest WebXR relay without starting robot arms"
+    )
+    relay.add_argument("--host", default="127.0.0.1", help="bind address")
+    relay.add_argument("--port", type=int, default=8443, help="listen port")
+    relay.add_argument("--ssl-keyfile", default=None, help="TLS private key (PEM)")
+    relay.add_argument("--ssl-certfile", default=None, help="TLS certificate (PEM)")
+
     infer = sub.add_parser(
         "infer",
         help="run bimanual YAM MolmoAct2 inference, execute chunks, and visualize them",
     )
-    infer.add_argument(
-        "--rig", default="yam_bimanual", help="the trained bimanual YAM rig"
-    )
+    infer.add_argument("--rig", default="yam_bimanual", help="the trained bimanual YAM rig")
     infer.add_argument(
         "--interface",
         action="append",
@@ -2097,9 +2523,7 @@ def main(argv: list[str] | None = None) -> int:
         "rollout",
         help="record interactive MolmoAct episodes as a LeRobot v3 dataset",
     )
-    rollout.add_argument(
-        "--rig", default="yam_bimanual", help="the trained bimanual YAM rig"
-    )
+    rollout.add_argument("--rig", default="yam_bimanual", help="the trained bimanual YAM rig")
     rollout.add_argument(
         "--interface",
         action="append",
@@ -2111,9 +2535,7 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="local/Hub dataset id, e.g. Dimios45/openpi-fold-towel-rollout-ablation",
     )
-    rollout.add_argument(
-        "--root", type=Path, default=None, help="local LeRobot dataset directory"
-    )
+    rollout.add_argument("--root", type=Path, default=None, help="local LeRobot dataset directory")
     rollout.add_argument(
         "--episodes", type=int, default=3, help="number of rollout attempts (default: 3)"
     )
@@ -2317,7 +2739,7 @@ def main(argv: list[str] | None = None) -> int:
         "--teleop",
         choices=("vr", "hold"),
         default="vr",
-        help="vr: drive from a Quest via vr-teleop-kit. hold: arms stay still for "
+        help="vr: drive from a Quest via the vendored VR stack. hold: arms stay still for "
         "--hold-seconds, to check the pipeline without a headset",
     )
     rec.add_argument(
@@ -2328,11 +2750,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     rec.add_argument("--vr-url", default=None, help="relay WebSocket URL")
     rec.add_argument(
-        "--vr-kit", type=Path, default=None, help="path to a vr-teleop-kit checkout"
+        "--vr-kit",
+        type=Path,
+        default=None,
+        help="legacy path to an external vr-teleop-kit checkout (normally unnecessary)",
     )
-    rec.add_argument(
-        "--yam-xml", default=None, help="YAM MJCF the VR inverse kinematics loads"
-    )
+    rec.add_argument("--yam-xml", default=None, help="YAM MJCF the VR inverse kinematics loads")
     rec.add_argument(
         "--no-cameras",
         dest="cameras_enabled",
@@ -2353,10 +2776,131 @@ def main(argv: list[str] | None = None) -> int:
     rec.add_argument(
         "--skip-preflight", action="store_true", help="record without the doctor checks"
     )
-    rec.add_argument(
-        "--push-to-hub", action="store_true", help="upload once the arms are down"
-    )
+    rec.add_argument("--push-to-hub", action="store_true", help="upload once the arms are down")
     rec.add_argument("--private", action="store_true", help="with --push-to-hub, keep it private")
+
+    collect = sub.add_parser(
+        "collect",
+        help="Quest-teleoperate and collect a LeRobot v3 dataset with live Viser cameras",
+    )
+    collect.add_argument("--rig", default="yam_bimanual", help=f"one of: {', '.join(rig_names())}")
+    collect.add_argument(
+        "--arm",
+        choices=("both", "left", "right"),
+        default="both",
+        help="both records top + both wrists; one arm records top + that wrist",
+    )
+    collect.add_argument(
+        "--interface",
+        action="append",
+        metavar="ARM=IFACE",
+        help="move one arm to a different bus, e.g. --interface left=can_left (repeatable)",
+    )
+    collect.add_argument(
+        "--camera",
+        action="append",
+        metavar="NAME=DEVICE",
+        help="pin one selected camera to an explicit device (repeatable)",
+    )
+    collect.add_argument(
+        "--format",
+        "--dataset-format",
+        dest="dataset_format",
+        choices=("lerobot-v3",),
+        default="lerobot-v3",
+        help="dataset format (currently lerobot-v3)",
+    )
+    collect.add_argument(
+        "--repo-id",
+        default=None,
+        help="dataset id, e.g. you/yam-fold-towel. Required unless --dry-run",
+    )
+    collect.add_argument(
+        "--task",
+        default=None,
+        help="language instruction stored on every dataset frame",
+    )
+    collect.add_argument(
+        "--fps",
+        type=int,
+        default=30,
+        help="dataset and control-loop rate (default: 30)",
+    )
+    collect.add_argument(
+        "--camera-fps",
+        type=int,
+        default=None,
+        help="camera rate when it intentionally differs from --fps",
+    )
+    collect.add_argument(
+        "--num-episodes",
+        type=int,
+        default=0,
+        help="end after this many saved episodes (0 = until ctrl-c)",
+    )
+    collect.add_argument("--root", type=Path, default=None, help="local dataset root")
+    collect.add_argument("--yam-xml", default=None, help="YAM MJCF the VR IK loads")
+    collect.add_argument("--vr-url", default=None, help="override the relay WebSocket URL")
+    collect.add_argument(
+        "--no-cameras",
+        dest="cameras_enabled",
+        action="store_false",
+        help="collect state/action only and show no camera tiles",
+    )
+    collect.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="run the whole hardware session but write no dataset",
+    )
+    collect.add_argument(
+        "--no-park",
+        dest="park",
+        action="store_false",
+        help="de-energize in place instead of parking at home_pos",
+    )
+    collect.add_argument(
+        "--skip-preflight", action="store_true", help="collect without doctor checks"
+    )
+    collect.add_argument(
+        "--push-to-hub", action="store_true", help="upload after the arms are down"
+    )
+    collect.add_argument(
+        "--private", action="store_true", help="with --push-to-hub, keep it private"
+    )
+    collect.add_argument(
+        "--no-viz",
+        dest="visualize",
+        action="store_false",
+        help="disable the measured-arm and recorded-camera Viser page",
+    )
+    collect.add_argument("--port", type=int, default=8080, help="Viser HTTP port")
+    collect.add_argument(
+        "--mesh-dir", type=Path, default=None, help="directory holding the YAM URDF meshes"
+    )
+    collect.add_argument(
+        "--quest-transport",
+        choices=("usb", "lan"),
+        default="usb",
+        help="usb creates an ADB reverse tunnel; lan uses direct HTTPS",
+    )
+    collect.add_argument(
+        "--adb-serial", default=None, help="ADB serial when several devices are connected"
+    )
+    collect.add_argument(
+        "--open-quest",
+        action="store_true",
+        help="open the relay page in the Quest browser after creating the USB tunnel",
+    )
+    collect.add_argument(
+        "--no-relay",
+        action="store_true",
+        help="use an already-running relay instead of the shared in-process relay",
+    )
+    collect.add_argument("--relay-host", default="127.0.0.1", help="relay bind address")
+    collect.add_argument("--relay-port", type=int, default=8443, help="relay port")
+    collect.add_argument("--ssl-keyfile", default=None, help="relay TLS private key")
+    collect.add_argument("--ssl-certfile", default=None, help="relay TLS certificate")
+    collect.add_argument("--quest-url", default=None, help="browser URL used by --open-quest")
 
     args = parser.parse_args(argv)
     log_path = runlog.setup_run_logging(args.command)
@@ -2365,10 +2909,13 @@ def main(argv: list[str] | None = None) -> int:
         "doctor": _command_doctor,
         "zero": _command_zero,
         "live": _command_live,
+        "teleop": _command_teleop,
+        "relay": _command_relay,
         "infer": _command_infer,
         "rollout": _command_rollout,
         "cameras": _command_cameras,
         "record": _command_record,
+        "collect": _command_collect,
     }
     try:
         return commands[args.command](args, log_path)
@@ -2389,9 +2936,7 @@ def _command_doctor(args: argparse.Namespace, log_path: Path) -> int:
         raise ConfigurationError("doctor needs either --rig, or both --model and --interface")
 
     print(f"doctor: {args.model} on {args.interface}")
-    results = run_doctor(
-        args.model, args.interface, effector_model=args.effector, probe=args.probe
-    )
+    results = run_doctor(args.model, args.interface, effector_model=args.effector, probe=args.probe)
     for result in results:
         print(result.render())
     failures = sum(1 for result in results if result.status == _FAIL)
@@ -2403,9 +2948,7 @@ def _command_doctor(args: argparse.Namespace, log_path: Path) -> int:
 
 def _doctor_rig(args: argparse.Namespace, log_path: Path) -> int:
     """Every arm of a rig, checked with the same code ``live`` preflights with."""
-    rig = resolve_rig(args.rig).with_interfaces(
-        _parse_interface_overrides(args.interface_override)
-    )
+    rig = resolve_rig(args.rig).with_interfaces(_parse_interface_overrides(args.interface_override))
     print(f"doctor: rig {rig.name} — {rig.description}")
     failures = warnings = 0
     for rig_arm in rig.arms:
@@ -2433,8 +2976,7 @@ def _doctor_rig(args: argparse.Namespace, log_path: Path) -> int:
         print(result.render())
 
     print(
-        f"\n{len(rig.arms)} arms, {len(rig.cameras)} cameras, "
-        f"{failures} failed, {warnings} warned"
+        f"\n{len(rig.arms)} arms, {len(rig.cameras)} cameras, {failures} failed, {warnings} warned"
     )
     print(f"log: {log_path}")
     return 1 if failures else 0
@@ -2447,9 +2989,7 @@ def _command_zero(args: argparse.Namespace, log_path: Path) -> int:
         plan = tuple(entry for entry in full_plan if entry.joint_id == args.joint)
         if not plan:
             known = ", ".join(str(entry.joint_id) for entry in full_plan)
-            raise ConfigurationError(
-                f"{args.model} has no joint {args.joint}; joints are {known}"
-            )
+            raise ConfigurationError(f"{args.model} has no joint {args.joint}; joints are {known}")
 
     port_type = plan_port_type(plan)
     if port_type is None:
@@ -2498,11 +3038,160 @@ def _parse_interface_overrides(values: list[str] | None) -> dict[str, str]:
     for value in values or []:
         arm, _, interface = value.partition("=")
         if not arm or not interface:
-            raise ConfigurationError(
-                f"--interface takes ARM=IFACE (e.g. left=can2), got {value!r}"
-            )
+            raise ConfigurationError(f"--interface takes ARM=IFACE (e.g. left=can2), got {value!r}")
         overrides[arm] = interface
     return overrides
+
+
+def _command_relay(args: argparse.Namespace, log_path: Path) -> int:
+    from .quest import run_relay_server
+
+    status = run_relay_server(
+        host=args.host,
+        port=args.port,
+        ssl_keyfile=args.ssl_keyfile,
+        ssl_certfile=args.ssl_certfile,
+    )
+    print(f"log: {log_path}")
+    return status
+
+
+def _command_teleop(args: argparse.Namespace, log_path: Path) -> int:
+    if args.quest_transport == "lan" and args.open_quest:
+        raise ConfigurationError("--open-quest is only available with --quest-transport usb")
+    if args.relay_port <= 0 or args.relay_port > 65535:
+        raise ConfigurationError(f"--relay-port must be between 1 and 65535, got {args.relay_port}")
+    if args.quest_transport == "lan" and not args.no_relay:
+        if not (args.ssl_keyfile and args.ssl_certfile):
+            raise ConfigurationError(
+                "LAN Quest WebXR needs TLS; provide --ssl-keyfile and --ssl-certfile, "
+                "or use --quest-transport usb"
+            )
+
+    rig = resolve_rig(args.rig).with_interfaces(_parse_interface_overrides(args.interface))
+    if args.arm != "both":
+        rig = rig.subset([args.arm])
+    print(f"teleop: rig {rig.name} — {rig.description}")
+    for rig_arm in rig.arms:
+        print(
+            f"  {rig_arm.name:<8} {rig_arm.model:<6} {rig_arm.interface:<8} "
+            f"{rig_arm.effector_model or 'no effector':<12} {rig_arm.role}"
+        )
+
+    if not args.skip_preflight:
+        failures, reports = preflight_rig(rig)
+        for name, results in reports:
+            problems = [result for result in results if result.status != _OK]
+            summary = "all checks pass" if not problems else f"{len(problems)} to look at"
+            print(f"\npreflight {name}: {summary}")
+            for result in problems:
+                print(result.render())
+        if failures:
+            print(
+                f"\n{failures} failed check(s); nothing was energized. "
+                "Fix them, or re-run with --skip-preflight.",
+                file=sys.stderr,
+            )
+            return 1
+
+    from .quest import QuestAdbTunnel, QuestRelay
+    from .teleop_runtime import run_teleop
+
+    relay: QuestRelay | None = None
+    adb: QuestAdbTunnel | None = None
+    try:
+        relay_host = args.relay_host
+        if args.quest_transport == "lan" and relay_host == "127.0.0.1":
+            relay_host = "0.0.0.0"
+        if not args.no_relay:
+            relay = QuestRelay(
+                host=relay_host,
+                port=args.relay_port,
+                ssl_keyfile=args.ssl_keyfile,
+                ssl_certfile=args.ssl_certfile,
+            )
+            relay.start()
+            if args.quest_transport == "usb":
+                print(f"  relay    {relay.page_url} (local workstation)")
+            else:
+                print(
+                    f"  relay    {args.ssl_certfile} — open https://<workstation-ip>:"
+                    f"{args.relay_port}/ in the Quest"
+                )
+
+        if args.quest_transport == "usb":
+            adb = QuestAdbTunnel(port=args.relay_port, serial=args.adb_serial)
+            serial = adb.connect()
+            print(f"  quest    USB tunnel ready ({serial})")
+            if args.open_quest:
+                page_url = args.quest_url or (
+                    relay.page_url if relay else _default_quest_page(args)
+                )
+                adb.open_page(page_url)
+                print(f"  quest    opened {page_url}")
+        elif args.quest_url:
+            print(f"  quest    open {args.quest_url}")
+
+        ws_url = args.vr_url or _default_teleop_ws(args)
+        config = _teleop_config(args)
+        print()
+        status = run_teleop(
+            rig,
+            ws_url=ws_url,
+            model_path=args.yam_xml,
+            rate_hz=args.rate,
+            park=args.park,
+            config_overrides=config,
+            max_state_age_s=args.state_timeout,
+        )
+    finally:
+        if adb is not None:
+            adb.close()
+        if relay is not None:
+            relay.stop()
+    print(f"log: {log_path}")
+    return status
+
+
+def _default_teleop_ws(args: argparse.Namespace) -> str:
+    scheme = "wss" if args.ssl_keyfile or args.ssl_certfile else "ws"
+    return f"{scheme}://127.0.0.1:{args.relay_port}/ws"
+
+
+def _default_quest_page(args: argparse.Namespace) -> str:
+    scheme = "https" if args.ssl_keyfile or args.ssl_certfile else "http"
+    return f"{scheme}://localhost:{args.relay_port}/"
+
+
+def _teleop_config(args: argparse.Namespace) -> dict[str, object]:
+    config: dict[str, object] = {"id": args.teleop_id}
+    for _, dest, _ in _TELEOP_IK_FIELDS:
+        value = getattr(args, dest)
+        if value is not None:
+            config[dest] = value
+    if args.precision_factor is not None:
+        config["precision_factor"] = args.precision_factor
+    if args.rest_ramp_duration is not None:
+        config["rest_ramp_duration_s"] = args.rest_ramp_duration
+    if args.no_ik_state:
+        config["publish_ik_state"] = False
+    if args.no_force_haptics:
+        config["force_haptic_enabled"] = False
+
+    left_rest = _parse_rest_pose(args.rest_pose_left, env_var="LEFT_REST_POSE")
+    right_rest = _parse_rest_pose(args.rest_pose_right, env_var="RIGHT_REST_POSE")
+    if left_rest is not None:
+        config["rest_qpos_left"] = left_rest
+    if right_rest is not None:
+        config["rest_qpos_right"] = right_rest
+
+    if args.max_dq_pos is not None or args.max_dq_rot is not None:
+        position_cap = args.max_dq_pos if args.max_dq_pos is not None else 0.06
+        rotation_cap = args.max_dq_rot if args.max_dq_rot is not None else 0.24
+        config["max_dq_per_joint_scalar_pos"] = position_cap
+        config["max_dq_per_joint_scalar_rot"] = rotation_cap
+        config["max_dq_per_joint"] = [position_cap] * 3 + [rotation_cap] * 3
+    return config
 
 
 def _command_live(args: argparse.Namespace, log_path: Path) -> int:
@@ -2705,9 +3394,7 @@ def _command_record(args: argparse.Namespace, log_path: Path) -> int:
     # a loop at 90 Hz reading 30 fps cameras would write each frame three times
     # and call it data. RGB straight from the SDK, because converting in numpy
     # costs 4.1 ms of an 11.1 ms tick with three cameras (see record.to_rgb).
-    rig = rig.with_camera_capture(
-        fps=args.camera_fps or args.fps, pixel_format="rgb8"
-    )
+    rig = rig.with_camera_capture(fps=args.camera_fps or args.fps, pixel_format="rgb8")
 
     # A dataset carries its task string on every frame, and relabelling means
     # rewriting the dataset, so an unset --task is worth a word rather than a

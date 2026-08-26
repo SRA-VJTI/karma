@@ -12,6 +12,7 @@ import json
 import threading
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from fake_arm_backend import FakeArmBackend
 
@@ -420,9 +421,7 @@ def test_a_failed_bring_up_leaves_nothing_energized(fakes) -> None:
 
     def factory(rig_arm):
         fails = rig_arm.name == "right"
-        backend = FakeArmBackend(
-            connect_error=NativeProcessError("no node") if fails else None
-        )
+        backend = FakeArmBackend(connect_error=NativeProcessError("no node") if fails else None)
         made[rig_arm.name] = backend
         return backend
 
@@ -458,9 +457,7 @@ def test_no_park_de_energizes_in_place(fakes) -> None:
         assert True not in backend.closes
 
 
-def test_an_arm_whose_node_has_no_ready_move_is_closed_in_place_out_loud(
-    fakes, capsys
-) -> None:
+def test_an_arm_whose_node_has_no_ready_move_is_closed_in_place_out_loud(fakes, capsys) -> None:
     factory, made = fakes
     session, live_arms = cli.power_up(
         resolve_rig("yam_bimanual"), backend_factory=factory(supports_move_to_ready=False)
@@ -739,9 +736,7 @@ def test_a_rig_with_no_cameras_says_so_instead_of_passing_vacuously(
     assert "none" in results[0].detail
 
 
-def test_the_cameras_command_exits_nonzero_only_on_a_failure(
-    fake_camera_bus, capsys
-) -> None:
+def test_the_cameras_command_exits_nonzero_only_on_a_failure(fake_camera_bus, capsys) -> None:
     fake_camera_bus(["348523020354"])
 
     # Two cameras missing, but missing is a warning here, so this still passes.
@@ -864,7 +859,7 @@ def test_record_narrows_cameras_with_only(fake_camera_bus, monkeypatch, capsys) 
         return 0
 
     monkeypatch.setattr(cli, "run_record", fake_run)
-    cli.main(["record", "--dry-run", "--task", "t", "--only", "right"])
+    cli.main(["record", "--dry-run", "--task", "t", "--only", "right", "--skip-preflight"])
 
     assert seen["arms"] == ("right",)
     assert seen["cameras"] == ("top", "right_wrist")
@@ -971,6 +966,82 @@ def test_the_arms_come_down_even_when_the_session_raises(fakes) -> None:
         assert not backend.connected
 
 
+def test_record_viser_shows_measured_arms_and_the_shared_recording_cameras(
+    fakes, monkeypatch
+) -> None:
+    from openpi_control import viz
+
+    factory, _ = fakes
+    rig = resolve_rig("yam_bimanual").subset(["right"])
+    frame = np.zeros((24, 32, 3), dtype=np.uint8)
+
+    class Camera:
+        pixel_format = "rgb8"
+        spec = SimpleNamespace(label="Right wrist")
+
+        def latest(self):
+            return frame
+
+    camera = Camera()
+    updates = []
+    panel_steps = []
+    panel_readers = []
+
+    class Server:
+        def __init__(self):
+            self.stops = 0
+
+        def stop(self):
+            self.stops += 1
+
+    class Scene:
+        url = "http://localhost:8080"
+
+        def __init__(self):
+            self.server = Server()
+
+        def update(self, name, joints):
+            updates.append((name, tuple(joints)))
+
+    scene = Scene()
+
+    class SceneFactory:
+        @staticmethod
+        def from_rig(*args, **kwargs):
+            del args, kwargs
+            return scene
+
+    class Panel:
+        def __init__(self, server, readers, **kwargs):
+            del server, kwargs
+            panel_readers.append(dict(readers))
+
+        def step(self, dt):
+            panel_steps.append(dt)
+
+    monkeypatch.setattr(viz, "ArmSceneVisualizer", SceneFactory)
+    monkeypatch.setattr(viz, "CameraPanel", Panel)
+
+    status = cli.run_record(
+        rig,
+        task="preview",
+        repo_id=None,
+        teleop="hold",
+        fps=200,
+        hold_duration_s=0.02,
+        dry_run=True,
+        camera_readers={"right_wrist": camera},
+        visualize=True,
+        backend_factory=factory(),
+    )
+
+    assert status == 0
+    assert panel_readers == [{"right_wrist": camera}]
+    assert panel_steps
+    assert updates and {name for name, _ in updates} == {"right"}
+    assert scene.server.stops == 1
+
+
 # --------------------------------------------------------------------------- #
 # live camera preview
 # --------------------------------------------------------------------------- #
@@ -989,9 +1060,7 @@ def test_preview_names_the_cameras_it_could_not_open(tmp_path, monkeypatch, caps
 
     rig = resolve_rig("yam_bimanual")
     # Only the top camera is on this bus; both wrists are unplugged.
-    monkeypatch.setattr(
-        cameras_mod, "BY_ID_DIR", fake_by_id(tmp_path, [rig.cameras[0].serial])
-    )
+    monkeypatch.setattr(cameras_mod, "BY_ID_DIR", fake_by_id(tmp_path, [rig.cameras[0].serial]))
     opened = []
 
     class _Reader:

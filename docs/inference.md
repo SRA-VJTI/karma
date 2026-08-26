@@ -134,7 +134,7 @@ Use `rollout` when the goal is a dataset of policy attempts rather than an
 open-ended controller run. LeRobot is optional because it brings in torch:
 
 ```bash
-uv sync --extra lerobot
+uv sync
 uv run openpi-control rollout \
     --repo-id Dimios45/openpi-fold-towel-rollout-ablation \
     --root ~/openpi-data/rollouts/fold-towel \

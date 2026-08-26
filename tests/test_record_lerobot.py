@@ -12,6 +12,8 @@ box (the extra needs Python 3.12+ and pulls torch).
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pytest
 
@@ -101,6 +103,26 @@ def test_cameras_are_stored_as_video_not_a_pile_of_images(tmp_path) -> None:
     assert any(name.endswith(".mp4") for name in on_disk)
     assert any(name.endswith(".parquet") for name in on_disk)
     assert not [name for name in on_disk if name.endswith(".png")]
+
+
+def test_svt_encoder_is_quiet_and_uses_a_supported_preset(
+    tmp_path, monkeypatch, capfd
+) -> None:
+    # SVT bypasses Python/FFmpeg log levels and writes its banner directly to
+    # stderr.  Capture at the file-descriptor level so this test sees the same
+    # native output that otherwise floods an operator's terminal.
+    monkeypatch.delenv("SVT_LOG", raising=False)
+    writer = sink(tmp_path)
+
+    assert os.environ["SVT_LOG"] == "1"  # errors only
+    assert writer._dataset.writer._rgb_encoder.preset == 10
+
+    for _ in range(2):
+        writer.add_frame(frame(0.0, DATASET_GRIPPER_OPEN))
+    writer.save_episode()
+    writer.finalize()
+
+    assert "Svt[" not in capfd.readouterr().err
 
 
 def test_a_discarded_take_leaves_nothing_behind(tmp_path) -> None:

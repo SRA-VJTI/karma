@@ -179,6 +179,19 @@ def test_a_late_arm_still_gets_seeded() -> None:
     assert step.targets
 
 
+def test_a_bimanual_seed_waits_for_both_selected_arm_states() -> None:
+    vr, teleop = source()
+
+    step = vr.poll({"left": state(), "right": None})
+
+    assert step.targets == {}
+    assert teleop.seeds == []
+
+    step = vr.poll({"left": state(), "right": state()})
+    assert step.targets
+    assert len(teleop.seeds) == 1
+
+
 # --------------------------------------------------------------------------- #
 # buttons
 # --------------------------------------------------------------------------- #

@@ -79,14 +79,17 @@ lerobot = [
     # would make `uv sync` unusable there even for people who never record.
     "lerobot[dataset]>=0.6; python_version >= '3.12'",
 ]
-# Driving the arms from a Quest headset (openpi_control.teleop_vr). These are
-# vr-teleop-kit's own runtime dependencies -- its IK loads the YAM MJCF through
-# mujoco, and it reaches the relay over a WebSocket -- listed here because the
-# kit is a sibling checkout rather than a package we depend on, so nothing else
-# would install them. The kit itself comes from that checkout (--vr-kit).
+# Driving the arms from a Quest headset (openpi_control.teleop_vr). The
+# vendored VR stack includes its WebSocket relay, WebXR page, optional WebRTC
+# camera publisher, and YAM IK, so this extra contains the complete runtime.
 vr = [
     "mujoco>=3.2",
     "websockets>=13",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "aiortc>=1.9",
+    "av>=12",
+    "opencv-python-headless>=4.10",
 ]
 
 # `uv sync` is an exact sync: it uninstalls whatever is not in the set it was
@@ -99,28 +102,34 @@ vr = [
 # and deployment convenience, so it stays out of the published wheel's metadata
 # -- `pip install openpi-control[cameras]` is unaffected by anything here.
 #
-# `lerobot` is deliberately absent: it drags in torch, which is gigabytes a box
-# that only drives arms never loads. Add it per-command when recording; because
-# this group is a default, `--extra lerobot` adds to it instead of replacing it.
+# Collection is a first-class operator command, so LeRobot is part of the cell
+# environment. That makes the documented `uv run openpi collect ...` command
+# self-contained instead of failing after preflight with an extra-install hint.
+# Published wheels keep it optional: only this checkout's default deployment
+# group pulls in the heavier dataset stack.
 [dependency-groups]
-cell = ["openpi-control[dev,viz,cameras,inference,vr]"]
+cell = ["openpi-control[dev,viz,cameras,inference,lerobot,vr]"]
 
 [tool.uv]
 default-groups = ["cell"]
 
 [project.scripts]
+openpi = "openpi_control.cli:main"
 openpi-control = "openpi_control.cli:main"
 openpi-control-viz = "openpi_control.viz:main"
+vr-teleop-relay = "vr_teleop_kit.relay.server:main"
 
 [tool.scikit-build]
 cmake.version = ">=3.22"
 wheel.py-api = "py3"
-wheel.packages = ["src/openpi_control"]
+wheel.packages = ["src/openpi_control", "src/vr_teleop_kit"]
 wheel.install-dir = ""
 sdist.include = [
   "native/**",
   "src/openpi_control/models/**",
   "src/openpi_control/arm_commands/**",
+  "src/vr_teleop_kit/**",
+  "licenses/**",
   "tests/**",
   "scripts/**",
 ]
