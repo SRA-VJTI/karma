@@ -34,6 +34,12 @@ head/top camera and both wrist cameras.
 
 The session ends itself after `--num-episodes` saves, or on ctrl-c.
 
+The trigger is analog, not binary. A partial squeeze commands a partially
+closed gripper and is stored as the same continuous `float32` value in both the
+`observation.state` and `action` gripper columns. In LeRobot convention `0.0`
+is fully open, `1.0` is fully closed, and values between them retain their
+meaning (for example, `0.4` means 40% closed).
+
 ## Where the pieces live
 
 The complete VR runtime is vendored in `src/vr_teleop_kit/`. It owns the WebXR

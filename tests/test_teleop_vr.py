@@ -119,6 +119,16 @@ def test_a_squeezed_trigger_becomes_a_closed_gripper() -> None:
     assert step.targets["left"].effector == pytest.approx(NATIVE_GRIPPER_CLOSED)
 
 
+def test_a_partial_trigger_squeeze_stays_continuous() -> None:
+    vr, _ = source(gripper=0.4)
+
+    step = vr.poll({"left": state(), "right": state()})
+
+    # Dataset/trigger 0.4 closed maps to native 0.6 open; it is not treated as
+    # a binary button press.
+    assert step.targets["left"].effector == pytest.approx(0.6)
+
+
 def test_the_seed_converts_the_gripper_the_other_way() -> None:
     # seed_qpos_from_obs speaks the teleoperator's convention, so a fully open
     # gripper (native 1.0) has to arrive there as 0.0.

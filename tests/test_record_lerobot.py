@@ -192,10 +192,12 @@ def test_an_empty_episode_cannot_be_saved(tmp_path) -> None:
 
 
 def test_the_gripper_column_round_trips_in_dataset_units(tmp_path) -> None:
-    # 0.0 open, 1.0 closed, all the way through parquet. If this inverts, every
-    # policy trained on the data learns the opposite of what the operator did.
+    # 0.0 open, 1.0 closed, with intermediate analog values preserved all the
+    # way through parquet. If this inverts or quantizes, policies cannot learn
+    # how far to close the gripper.
     writer = sink(tmp_path, cameras=False)
     writer.add_frame(frame(0.0, DATASET_GRIPPER_OPEN, camera=False))
+    writer.add_frame(frame(0.0, 0.37, camera=False))
     writer.add_frame(frame(0.0, DATASET_GRIPPER_CLOSED, camera=False))
     writer.save_episode()
     writer.finalize()
@@ -203,7 +205,9 @@ def test_the_gripper_column_round_trips_in_dataset_units(tmp_path) -> None:
     dataset = LeRobotDataset("local/test", root=tmp_path / "ds")
 
     assert float(dataset[0]["observation.state"][1]) == pytest.approx(0.0)
-    assert float(dataset[1]["observation.state"][1]) == pytest.approx(1.0)
+    assert float(dataset[1]["observation.state"][1]) == pytest.approx(0.37)
+    assert float(dataset[1]["action"][1]) == pytest.approx(0.37)
+    assert float(dataset[2]["observation.state"][1]) == pytest.approx(1.0)
 
 
 def test_the_state_and_action_column_names_survive(tmp_path) -> None:

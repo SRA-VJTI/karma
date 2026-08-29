@@ -233,6 +233,17 @@ def test_a_commanded_gripper_is_recorded_in_dataset_units() -> None:
     assert action[-1] == pytest.approx(DATASET_GRIPPER_OPEN)
 
 
+def test_a_partially_closed_gripper_is_not_quantized() -> None:
+    # Native and LeRobot use opposite polarity, but both are continuous [0, 1]
+    # values. A 35%-open command must therefore be stored as 65%-closed, not
+    # rounded to one of the endpoints.
+    observation = np.zeros(7, dtype=np.float32)
+
+    action = action_vector(["left"], {"left": target(effector=0.35)}, observation, {"left": 6})
+
+    assert action[-1] == pytest.approx(0.65)
+
+
 # --------------------------------------------------------------------------- #
 # observation and action vectors
 # --------------------------------------------------------------------------- #
