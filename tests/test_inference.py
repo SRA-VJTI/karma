@@ -928,3 +928,107 @@ def test_gripper_watch_catches_a_slow_walk_no_single_chunk_would_show() -> None:
             {"left": _state("left", effector=0.0)},
         )
     assert watch.stalled() == ["left"]
+
+
+def test_a_dropped_chunk_cannot_land_in_the_next_request_s_slot() -> None:
+    # Nothing can cancel an HTTP call already in flight, so a dropped request
+    # keeps running. If its answer were still accepted when it lands, the chunk
+    # computed before a human intervention would be executed as though it were
+    # the answer to the corrected scene -- replaying the motion the correction
+    # just undid.
+    started = threading.Event()
+    release = threading.Event()
+
+    class SlowClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def infer(self, _observation, _instruction):
+            self.calls += 1
+            if self.calls == 1:
+                started.set()
+                release.wait(2.0)
+                return np.full((30, 14), 1.0)
+            return np.full((30, 14), 2.0)
+
+    client = SlowClient()
+    prefetcher = inference.ChunkPrefetcher(client)  # type: ignore[arg-type]
+    observation = _observation()
+    try:
+        prefetcher.submit(observation, "task")
+        assert started.wait(2.0), "the first request never reached the client"
+
+        prefetcher.drop()
+        release.set()
+        # The abandoned call is now landing while the next one is requested.
+        chunk = prefetcher.take(observation, "task")
+    finally:
+        release.set()
+        prefetcher.close()
+
+    np.testing.assert_allclose(chunk, 2.0)
+
+
+def _open_gripper_action() -> np.ndarray:
+    """A 14-D action that holds every joint at zero and asks both jaws open."""
+    action = np.zeros(14)
+    action[6] = action[13] = 1.0
+    return action
+
+
+def test_seeding_the_executor_keeps_a_gripper_that_is_holding_something() -> None:
+    # A jaw stopped on an object reads short of the value that closed it. Seed
+    # from that measurement and the grip gives back a slice; do it at every
+    # handoff and the object is put down by degrees.
+    executor = inference.BoundedChunkExecutor(max_step_rad=0.1, max_effector_step=0.2)
+    states = {"left": _state("left", effector=0.5), "right": _state("right", effector=0.5)}
+
+    executor.seed(states, effector={"left": 0.05, "right": 0.05})
+    # Ask for a fully open jaw: where one bounded step lands says what the
+    # integrator was seeded from.
+    commands = executor.step(_open_gripper_action())
+
+    assert commands["left"].effector == pytest.approx(0.25)  # 0.05 + one step
+
+
+def test_seeding_without_a_commanded_gripper_falls_back_to_the_measurement() -> None:
+    executor = inference.BoundedChunkExecutor(max_step_rad=0.1, max_effector_step=0.2)
+    states = {"left": _state("left", effector=0.5), "right": _state("right", effector=0.5)}
+
+    executor.seed(states)
+    commands = executor.step(_open_gripper_action())
+
+    assert commands["left"].effector == pytest.approx(0.7)  # 0.5 + one step
+
+
+def test_observe_effectors_matches_observe_and_tolerates_missing_state() -> None:
+    """The DAgger entry point records the same spans as the command-based one.
+
+    ``observe_effectors`` exists because the DAgger recorder polls its two
+    drivers alternately and never holds a PositionCommand map for a tick. It
+    has to agree with ``observe`` or the stall test means something different
+    depending on which recorder is running, and it has to survive the missing
+    states the record loop passes on a stalled tick.
+    """
+    by_command = inference.GripperWatch()
+    by_effector = inference.GripperWatch()
+    states = {"left": _state("left"), "right": _state("right")}
+    for value in (1.0, 0.75, 0.5, 0.25, 0.0):
+        by_command.observe(
+            {name: PositionCommand(np.zeros(6), effector=value) for name in ("left", "right")},
+            states,
+        )
+        by_effector.observe_effectors({"left": value, "right": value}, states)
+    assert by_effector.stalled() == by_command.stalled() == ["left", "right"]
+    assert by_effector.commanded == by_command.commanded
+    assert by_effector.measured == by_command.measured
+
+    # A stalled record tick hands on a None state; it must not count as a
+    # measurement, and it must not raise.
+    by_effector.observe_effectors({"left": 0.0}, {"left": None})
+    assert by_effector.stalled() == ["left", "right"]
+
+    # An arm the driver has not commanded yet contributes no command span.
+    fresh = inference.GripperWatch()
+    fresh.observe_effectors({"left": None}, {"left": _state("left")})
+    assert fresh.stalled() == []

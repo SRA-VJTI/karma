@@ -164,12 +164,41 @@ class ArmTarget:
             )
 
 
+#: Frame columns :func:`record_session` builds itself. A source's ``extras``
+#: may not carry these -- silently overwriting the measured state or the
+#: commanded action is the one way an extra column could corrupt a dataset
+#: rather than merely add to it.
+CAMERA_FEATURE_PREFIX = "observation.images."
+RESERVED_FRAME_KEYS = frozenset({"observation.state", "action", "task"})
+
+
 @dataclass(frozen=True, slots=True)
 class TeleopStep:
-    """One tick's worth of intent from the teleop source."""
+    """One tick's worth of intent from the teleop source.
+
+    ``extras`` are additional dataset columns for this frame, written beside
+    the state, action, and camera views the loop builds itself. They exist for
+    what only the source knows -- whether a human was driving this tick, which
+    is the whole content of a DAgger label. A source that emits them owes the
+    sink a matching feature spec: LeRobot requires every feature on every
+    frame, so an undeclared column fails at the first ``add_frame``, and a
+    declared column the source stops emitting fails just as hard.
+    """
 
     targets: Mapping[str, ArmTarget] = field(default_factory=dict)
     event: EpisodeEvent = EpisodeEvent.NONE
+    extras: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        clashes = sorted(
+            key
+            for key in self.extras
+            if key in RESERVED_FRAME_KEYS or key.startswith(CAMERA_FEATURE_PREFIX)
+        )
+        if clashes:
+            raise ConfigurationError(
+                f"teleop source extras may not overwrite recorded columns: {', '.join(clashes)}"
+            )
 
 
 class TeleopSource(Protocol):
@@ -248,6 +277,7 @@ def arm_feature_names(arm_names: Sequence[str], dofs: Mapping[str, int]) -> list
 def build_features(
     state_names: Sequence[str],
     camera_shapes: Mapping[str, tuple[int, int, int]],
+    extra: Mapping[str, dict] | None = None,
 ) -> dict[str, dict]:
     """The LeRobot feature dict for a session.
 
@@ -255,6 +285,11 @@ def build_features(
     mp4 per camera instead of a directory of PNGs -- the difference is roughly
     two orders of magnitude on disk. Shapes come from a real frame, not from
     the requested capture size, so a rotated camera is described correctly.
+
+    ``extra`` declares the columns a source adds through
+    :attr:`TeleopStep.extras`, and is the other half of that contract: the
+    schema and the frames have to agree exactly, so they are named together at
+    the one call site that wants either.
     """
     features: dict[str, dict] = {
         "observation.state": {
@@ -269,11 +304,17 @@ def build_features(
         },
     }
     for name, shape in camera_shapes.items():
-        features[f"observation.images.{name}"] = {
+        features[f"{CAMERA_FEATURE_PREFIX}{name}"] = {
             "dtype": "video",
             "shape": shape,
             "names": ["height", "width", "channels"],
         }
+    for name, spec in (extra or {}).items():
+        if name in features:
+            raise ConfigurationError(
+                f"extra feature {name!r} collides with a recorded column"
+            )
+        features[name] = dict(spec)
     return features
 
 
@@ -592,6 +633,9 @@ def record_session(
                     "action": action_vector(arm_names, step.targets, observation, dofs),
                     "task": task,
                 }
+                # Validated against the recorded columns when the step was
+                # built, so this cannot shadow the three above.
+                frame.update(step.extras)
                 for name, camera in cameras.items():
                     image = camera.latest()  # type: ignore[attr-defined]
                     if image is None:

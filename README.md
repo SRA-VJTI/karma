@@ -2,13 +2,13 @@
 
 Robot-cell control for the Karma bimanual YAM platform: native arm control,
 Meta Quest VR teleoperation, LeRobot v3 demonstration collection, MolmoAct2
-inference, rollout recording, RealSense cameras, and live Viser visualization.
-Each arm runs one `pi_control_node` process and communicates with the Python
-operator process over ZeroMQ.
+inference, rollout and human-in-the-loop (DAgger) recording, RealSense cameras,
+and live Viser visualization. Each arm runs one `pi_control_node` process and
+communicates with the Python operator process over ZeroMQ.
 
 > [!CAUTION]
-> `teleop`, `collect`, `infer`, and `rollout` energize physical robot arms.
-> Run them in the foreground with the workspace clear. Their normal Ctrl-C
+> `teleop`, `collect`, `infer`, `rollout`, and `hitl` energize physical robot
+> arms. Run them in the foreground with the workspace clear. Their normal Ctrl-C
 > paths park the selected arms at `home_pos` and then de-energize them; do not
 > use `--no-park` unless stopping in place is intentional and safe.
 
@@ -262,6 +262,38 @@ from `collect`, where Ctrl-C discards an unfinished demonstration. A second
 Ctrl-C at an interactive prompt exits the multi-episode run. Viser is available
 at <http://localhost:8080> throughout each attempt.
 
+### 5. Record human corrections (DAgger)
+
+Use `hitl` when the policy should drive but you want to be able to rescue it,
+and to keep what you did when you rescued it:
+
+```bash
+uv run openpi hitl \
+    --repo-id SRA-VJTI/molmo-fold-pink-towel-dagger-v1 \
+    --root ~/openpi-data/dagger/molmo-fold-pink-towel-v1 \
+    --episodes 5 \
+    --episode-seconds 120 \
+    --server http://192.168.0.107:4090 \
+    --interface left=can_left \
+    --interface right=can_right \
+    --speed 0.5 \
+    --open-quest
+```
+
+| In VR | Does |
+| --- | --- |
+| Right B | Take the arms; the policy stops |
+| Left Y (tap) | Hand back; the policy re-plans and continues |
+| Left Y (hold 1s) | End this attempt now — save, park, `y/n`, next attempt |
+
+`--episode-seconds` is a backstop; hold Left Y (or press Ctrl-C) when the
+attempt is done rather than waiting it out.
+
+Every frame is recorded with an `intervention` column saying who was driving,
+so the dataset can be filtered to the corrections alone for HG-DAgger training.
+`openpi_control_hitl.json` records each attempt's prompt, `y/n` label, and
+takeover counts. See [docs/dagger.md](docs/dagger.md).
+
 ### Workflow summary
 
 | Goal | Command | Driver | Cameras | Dataset |
@@ -270,8 +302,9 @@ at <http://localhost:8080> throughout each attempt.
 | Record demonstrations | `uv run openpi collect` | Human/Quest | Top + selected wrist camera(s) | LeRobot v3 |
 | Run a policy | `uv run openpi infer` | MolmoAct2 | Top + both wrists | No |
 | Record policy attempts | `uv run openpi rollout` | MolmoAct2 | Top + both wrists | LeRobot v3 + rollout manifest |
+| Record corrections | `uv run openpi hitl` | MolmoAct2, human on Right B | Top + both wrists | LeRobot v3 + `intervention` column + manifest |
 
-All four hardware workflows preflight before energizing and own their complete
+All five hardware workflows preflight before energizing and own their complete
 shutdown path. Keep them in the foreground and use Ctrl-C rather than killing
 their native child processes directly.
 
@@ -516,6 +549,7 @@ owns the power-on and power-off that a live view implies. See
 | [docs/cameras.md](docs/cameras.md) | camera identity, discovery, the two D405 serials, capture rates |
 | [docs/recording.md](docs/recording.md) | LeRobot datasets, VR teleop, gripper polarity, episode boundaries |
 | [docs/inference.md](docs/inference.md) | MolmoAct2 HTTP inference, action chunks, and hardware execution |
+| [docs/dagger.md](docs/dagger.md) | human-in-the-loop recording, the handoff buttons, the `intervention` column |
 | [docs/viser.md](docs/viser.md) | render modes, mesh sourcing, rigs, joint ordering |
 | [docs/fr3.md](docs/fr3.md) | FR3 firmware, networking, controller, validation |
 | [docs/yam_teaching_handle.md](docs/yam_teaching_handle.md) | YAM handle CAN protocol and trigger calibration |

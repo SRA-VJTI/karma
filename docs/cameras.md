@@ -20,7 +20,7 @@ at run time:
 
 | Camera | Model | Serial | Capture | Rides on | Sees |
 | --- | --- | --- | --- | --- | --- |
-| `top` | D435 | `348523020354` | 640x480@30 | — | the whole cell, from above |
+| `top` | D435 | `348523020354` | 848x480@30 | — | the whole cell, from above |
 | `left_wrist` | D405 | `254623070863` | 848x480@30 | `left` | what the left gripper is about to touch |
 | `right_wrist` | D405 | `254623070417` | 848x480@30 | `right` | the same, for the right arm |
 
@@ -40,19 +40,33 @@ carry rather than paper over:
   it perfectly well, and device paths here are only ever diagnostics — a stream
   is opened by serial. Such a camera shows up as `sdk:<sdk-serial>` in the
   `cameras` table instead of a `/dev/...` path.
-- **It came up on USB 2.0, and captures 640x480@30 because of it.** Enumerated
-  on 2026-08-23 it offered only 424x240, 640x480, 1280x720@15 and 1920x1080@8 —
-  the reduced set a D435 falls back to on USB 2. A USB 3 D435 also has
-  848x480@30, which is the rig default and what the wrists run. So
-  `YAM_TOP_CAPTURE` in `rigs.py` is a workaround with an expiry date: re-seat
-  the camera on a USB 3 port, re-run `openpi-control cameras`, and delete the
-  override once 848x480@30 shows up. All three cameras do hold a full 30 fps
-  together as configured.
+- **It once came up on USB 2.0, and captured 640x480@30 because of it.**
+  Enumerated on 2026-08-23 it offered only 424x240, 640x480, 1280x720@15 and
+  1920x1080@8 — the reduced set a D435 falls back to on USB 2 — and a
+  `YAM_TOP_CAPTURE` override in `rigs.py` pinned it there. That is resolved:
+  re-checked on 2026-09-13 the camera offers 848x480 and 640x360 at 30 fps, so
+  it is on USB 3, the override is deleted, and the top camera takes the rig
+  default like the wrists. The top camera holds a true 30 fps at that mode.
 
-  The aspect ratio is the reason to bother. MolmoAct2's training frames are
-  640x360 and the D405 wrists are 848x480 — both 16:9. 640x480 is 4:3, so the
-  top view is currently the one input whose shape does not match what the
-  policy was trained on.
+  The wrists do not, as of 2026-09-13: `openpi cameras --probe` measures
+  `left_wrist` at 4 fps and `right_wrist` at 7 fps against the same 30 fps
+  request, and warns on both. It is not the top camera's mode (the wrists
+  measure the same with `top` pinned back to 640x480), not the pixel format,
+  not co-tenancy (one wrist alone is no faster), and not auto-exposure (capping
+  the exposure makes it marginally worse). The open suspect is the USB
+  topology: `lsusb -t` puts both D405s behind two cascaded hubs on bus 8, while
+  the healthy D435 has bus 2 to itself. Try each wrist in a motherboard USB 3
+  port and re-probe before recording anything -- at 4 fps the recorder repeats
+  the last frame to fill the schema, so the dataset looks complete and is not.
+
+  The aspect ratio was the reason to bother. MolmoAct2's training frames are
+  640x360 and the D405 wrists are 848x480 — both 16:9. 640x480 was 4:3, which
+  made the top view the one input whose shape did not match what the policy was
+  trained on; at 848x480 every view the policy is handed is 16:9.
+
+  If this camera is ever moved to a USB 2 port again it will silently lose
+  848x480. `openpi-control cameras` prints the mode each camera actually came
+  up in, which is where that shows.
 
 The checkpoint itself was trained with a D435 in the top role, so the camera
 *model* is a move toward the training setup rather than away from it — note

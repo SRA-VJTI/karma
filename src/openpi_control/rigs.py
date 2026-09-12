@@ -64,30 +64,20 @@ YAM_BIMANUAL_SEPARATION_M = 0.61
 # `cameras.sdk_serial_for_asic` bridges to the SDK's own serial when a stream is
 # actually opened.
 #
-# The wrists are D405s. The top is a D435 and differs in two ways that the rig
-# has to carry: it publishes no serial in its USB descriptor at all (so udev
-# cannot name it and discovery falls back to the SDK), and its colour sensor has
-# no 848x480 mode, so it captures at 640x480 -- see YAM_TOP_CAPTURE below.
+# The wrists are D405s. The top is a D435, which differs in one way the rig has
+# to carry: it publishes no serial in its USB descriptor at all, so udev cannot
+# name it and discovery falls back to the SDK. It used to differ in a second
+# way -- a USB 2.0 link left it without an 848x480 colour mode, so it captured
+# 640x480 through a `YAM_TOP_CAPTURE` override. It is on USB 3 now (848x480 and
+# 640x360 both enumerate at 30 fps, checked 2026-09-13), so the override is
+# gone and the top camera takes the rig default like the wrists. That also puts
+# every view the policy is handed at 16:9, matching MolmoAct2's 640x360
+# training frames; 640x480 was the one input that was 4:3.
 YAM_BIMANUAL_CAMERA_SERIALS = {
     "top": "348523020354",
     "left_wrist": "254623070863",
     "right_wrist": "254623070417",
 }
-
-# 640x480 is a USB 2.0 fallback, not this camera's real capability, and it
-# should go away rather than be preserved.
-#
-# Enumerated on 2026-08-23 the top D435 offered only 424x240, 640x480,
-# 1280x720@15 and 1920x1080@8 -- the reduced set a D435 falls back to when it
-# negotiates USB 2.0. On USB 3 it also offers 848x480@30 and 640x360@30, and
-# 848x480 is both the rig default and 16:9. That matters beyond frame rate:
-# MolmoAct2's training frames are 640x360, so every other view this cell feeds
-# the policy is 16:9 and 640x480 is the one that is 4:3.
-#
-# So: re-seat this camera on a USB 3 port, re-run `openpi-control cameras`, and
-# if 848x480@30 is in `cameras.supported_color_modes("348523020354")`, delete
-# this override and let the top camera take the rig default like the wrists.
-YAM_TOP_CAPTURE = {"width": 640, "height": 480}
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,7 +314,6 @@ def _yam_bimanual() -> Rig:
                 serial=YAM_BIMANUAL_CAMERA_SERIALS["top"],
                 label="Top-down",
                 extrinsic=YAM_TOP_CAMERA_EXTRINSIC,
-                **YAM_TOP_CAPTURE,
             ),
             RigCamera(
                 name="left_wrist",

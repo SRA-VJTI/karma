@@ -672,10 +672,10 @@ def test_camera_checks_pass_when_every_declared_camera_is_present(
 
     assert [r.status for r in results] == [cli._OK] * 3
     # The resolution is in the detail line, so an operator can see at a glance
-    # that a camera came up in the mode the rig asked for -- and the modes are
-    # not uniform: the top D435 has no 848x480, so it runs 640x480 while the
-    # D405 wrists keep their native mode.
-    assert "640x480@30" in results[0].detail
+    # that a camera came up in the mode the rig asked for. Uniform now the top
+    # D435 is on USB 3: every camera runs the rig default, which keeps all
+    # three views 16:9 like MolmoAct2's training frames.
+    assert "848x480@30" in results[0].detail
     assert "848x480@30" in results[1].detail
 
 
@@ -1215,3 +1215,116 @@ def test_a_missing_ip_binary_is_survivable(monkeypatch) -> None:
     monkeypatch.setattr(cli.subprocess, "run", boom)
 
     assert cli.can_bitrate("can0") is None
+
+
+# --------------------------------------------------------------------------- #
+# hitl
+# --------------------------------------------------------------------------- #
+
+
+def test_hitl_forwards_both_halves_of_the_session(monkeypatch) -> None:
+    # The command is a policy rollout and a teleoperation session at once, so
+    # both sets of options have to survive the trip.
+    seen: dict[str, object] = {}
+
+    def fake_hitl(rig, **kwargs):
+        seen["rig"] = rig
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli, "run_hitl", fake_hitl)
+
+    assert (
+        cli.main(
+            [
+                "hitl",
+                "--repo-id",
+                "you/yam-dagger",
+                "--skip-preflight",
+                "--server",
+                "http://gpu:4090",
+                "--speed",
+                "0.25",
+                "--episodes",
+                "2",
+                "--vr-url",
+                "ws://relay:8443/ws",
+                "--quest-transport",
+                "usb",
+                "--no-relay",
+            ]
+        )
+        == 0
+    )
+
+    assert seen["repo_id"] == "you/yam-dagger"
+    assert seen["server"] == "http://gpu:4090"
+    assert seen["speed"] == 0.25
+    assert seen["episodes"] == 2
+    assert seen["vr_url"] == "ws://relay:8443/ws"
+    assert seen["start_relay"] is False
+    assert seen["rig"].names == ("left", "right")
+
+
+def test_hitl_refuses_a_lan_session_without_tls(monkeypatch, capsys) -> None:
+    # WebXR will not start on an insecure LAN origin, and finding that out from
+    # the headset after the arms are energized is the expensive way.
+    monkeypatch.setattr(cli, "run_hitl", lambda rig, **kwargs: 0)
+
+    assert cli.main(["hitl", "--repo-id", "you/d", "--quest-transport", "lan"]) == 2
+    assert "--ssl-keyfile" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# settle_arm_states
+# --------------------------------------------------------------------------- #
+
+
+def _settling_arm(name: str, fresh_after: int = 0):
+    """A live-arm stand-in whose state goes fresh on the ``fresh_after``-th look."""
+    looks = {"count": 0}
+
+    class _State:
+        def is_fresh(self, max_age_s: float) -> bool:
+            del max_age_s
+            looks["count"] += 1
+            return looks["count"] > fresh_after
+
+    return SimpleNamespace(name=name, arm=SimpleNamespace(latest_state=_State()))
+
+
+def test_settle_arm_states_returns_once_every_arm_is_publishing() -> None:
+    """The happy path costs nothing: both arms fresh on the first look."""
+    arms = [_settling_arm("left"), _settling_arm("right")]
+    states = cli.settle_arm_states(arms)
+    assert sorted(states) == ["left", "right"]
+
+
+def test_settle_arm_states_waits_out_the_first_publish(capsys) -> None:
+    """The race this exists for: energized, but the node has not published yet.
+
+    ``power_up`` returns before the first state crosses the bus, and the
+    inference sources treat a stale state as fatal -- a whole DAgger session
+    used to die on a state one millisecond over the limit. Waiting turns that
+    into a line of output.
+    """
+    arms = [_settling_arm("left", fresh_after=3), _settling_arm("right")]
+    states = cli.settle_arm_states(arms, poll_s=0.0)
+    assert sorted(states) == ["left", "right"]
+    out = capsys.readouterr().out
+    assert "waiting for first arm state: left" in out
+    assert "arm state recovered" in out
+
+
+def test_settle_arm_states_gives_up_on_a_node_that_never_publishes() -> None:
+    """Silent for the whole timeout is a fault, not lateness — say so and stop."""
+    arms = [_settling_arm("left", fresh_after=10**9), _settling_arm("right")]
+    with pytest.raises(cli.InferenceError, match="no fresh state from left"):
+        cli.settle_arm_states(arms, timeout_s=0.05, poll_s=0.0)
+
+
+def test_settle_arm_states_treats_a_missing_state_as_not_ready() -> None:
+    """An arm that has published nothing at all is stale, not absent."""
+    arms = [SimpleNamespace(name="left", arm=SimpleNamespace(latest_state=None))]
+    with pytest.raises(cli.InferenceError, match="no fresh state from left"):
+        cli.settle_arm_states(arms, timeout_s=0.05, poll_s=0.0)

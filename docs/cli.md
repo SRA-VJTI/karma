@@ -10,6 +10,7 @@ is sane, set each servo's firmware zero, and bring a whole rig up and back down.
 | `live` | **energizes the arms**, and owns putting them down again |
 | `infer` | **energizes the bimanual YAM**, executes MolmoAct2 chunks, and owns putting it down again |
 | `rollout` | **energizes the bimanual YAM**, records LeRobot v3 episodes, and owns putting it down again |
+| `hitl` | like `rollout`, plus a Quest the operator can take the arms with mid-episode |
 | `cameras` | no, unless given `--probe` (which opens camera streams, not the bus) |
 | `record` | **energizes the arms** and teleoperates them, like `live` |
 | `collect` | **energizes selected YAM arm(s)**, Quest-teleoperates them, writes LeRobot v3, and owns putting them down again |
@@ -294,6 +295,41 @@ success label. The prompt is additionally written to every frame's LeRobot
 | `--interface ARM=IFACE` | override an arm's CAN interface |
 | `--camera NAME=DEVICE` | pin a camera to a device |
 | `--skip-preflight` | energize without doctor checks |
+
+## hitl
+
+`hitl` is `rollout` with the operator able to intervene. MolmoAct2 drives; a
+press of **Right B** stops it and hands the arms to the Quest, and a tap of
+**Left Y** gives them back, at which point the policy re-plans from the
+corrected scene. Holding **Left Y** for a second ends the attempt there instead
+— saving what was captured, parking both arms, and going straight to the `y/n`
+prompt — which is what `--episode-seconds` is a backstop for rather than the
+normal way an attempt ends. Ctrl-C does the same from the keyboard.
+
+Every frame is recorded either way, with an `intervention` column saying who
+was driving, so the dataset can be filtered to the corrections for HG-DAgger
+training.
+
+```bash
+uv sync
+uv run openpi hitl \
+    --repo-id you/yam-fold-towel-dagger-v1 \
+    --root ~/openpi-data/dagger/fold-towel \
+    --episodes 5 --episode-seconds 120 \
+    --server http://192.168.0.107:4090 \
+    --interface left=can_left --interface right=can_right \
+    --speed 0.5 --open-quest
+```
+
+It accepts every `rollout` flag, plus `collect`'s Quest options (`--vr-url`,
+`--yam-xml`, `--quest-transport`, `--open-quest`, `--no-relay`, `--relay-port`,
+`--ssl-keyfile`, `--ssl-certfile`, `--adb-serial`, `--quest-url`) and
+`--push-to-hub` / `--private`. The relay and headset connection are opened once
+around the whole run rather than per attempt. `openpi_control_hitl.json` records
+each attempt's prompt, `y/n` label, and takeover counts.
+
+Unlike `collect`, the arms are de-energized between attempts, so scene resets
+are done by hand. See [dagger.md](dagger.md).
 
 ## live
 

@@ -46,6 +46,7 @@ leaves a trace under ``~/openpi-data/logs/runtime/``.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import pathlib
@@ -671,6 +672,60 @@ class LiveArm:
     @property
     def name(self) -> str:
         return self.rig_arm.name
+
+
+def settle_arm_states(
+    live_arms: list[LiveArm],
+    *,
+    max_age_s: float = 0.25,
+    timeout_s: float = 10.0,
+    poll_s: float = 0.02,
+) -> dict[str, object]:
+    """Block until every arm has published a fresh state. Returns those states.
+
+    ``power_up`` returns when the native nodes are energized, which is before
+    any of them has necessarily put a state on the bus: connecting starts the
+    publisher, it does not wait for its first message. Anything that reads a
+    state on the very next line is therefore racing the node's first publish,
+    and loses it on a cold or loaded box.
+
+    ``teleop`` has always tolerated that -- it skips the tick and says so --
+    but the inference sources treat a stale state as fatal, so the same race
+    killed a whole DAgger session on a state 1 ms over the limit. Waiting here
+    is the cheap half of that fix: the run either starts with both arms
+    streaming or it never energizes the policy at all.
+
+    Raises :class:`InferenceError` when the arms are still silent at
+    ``timeout_s``, which is a real fault -- a node that has not published in
+    ten seconds is not late, it is not running.
+    """
+    deadline = time.monotonic() + timeout_s
+    announced = False
+    while True:
+        states: dict[str, object] = {}
+        stale: list[str] = []
+        for entry in live_arms:
+            state = entry.arm.latest_state
+            if state is None or not state.is_fresh(max_age_s):
+                stale.append(entry.name)
+            else:
+                states[entry.name] = state
+        if not stale:
+            if announced:
+                print("  state    arm state recovered", flush=True)
+            return states
+        if time.monotonic() >= deadline:
+            raise InferenceError(
+                f"no fresh state from {', '.join(sorted(stale))} after "
+                f"{timeout_s:g}s; the native node is not publishing"
+            )
+        if not announced:
+            announced = True
+            print(
+                "  state    waiting for first arm state: " + ", ".join(sorted(stale)),
+                flush=True,
+            )
+        time.sleep(poll_s)
 
 
 def preflight_rig(rig: Rig) -> tuple[int, list[tuple[str, list[CheckResult]]]]:
@@ -1633,6 +1688,477 @@ def _write_rollout_manifest(path: Path, manifest: Mapping[str, object]) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# human-in-the-loop (DAgger)
+# --------------------------------------------------------------------------- #
+
+
+def run_hitl(
+    rig: Rig,
+    *,
+    repo_id: str,
+    episodes: int = 1,
+    episode_seconds: float = 120.0,
+    fps: int = 30,
+    root: Path | None = None,
+    server: str | None = None,
+    request_timeout_s: float = DEFAULT_REQUEST_TIMEOUT_S,
+    num_steps: int = DEFAULT_MOLMOACT_NUM_STEPS,
+    enable_cuda_graph: bool = True,
+    jpeg_quality: int = DEFAULT_MOLMOACT_JPEG_QUALITY,
+    speed: float = 0.5,
+    chunk_size: int | None = None,
+    max_step_rad: float = DEFAULT_MAX_STEP_RAD,
+    max_effector_step: float = DEFAULT_MAX_EFFECTOR_STEP,
+    carry_targets: bool = False,
+    prefetch: bool = True,
+    prefetch_margin_s: float = DEFAULT_PREFETCH_MARGIN_S,
+    visualize: bool = True,
+    camera_overrides: dict[str, str] | None = None,
+    port: int = 8080,
+    mesh_dir: Path | None = None,
+    wait_between_episodes: bool = True,
+    vr_url: str | None = None,
+    vr_kit: Path | None = None,
+    yam_xml: str | None = None,
+    teleop_config: Mapping[str, object] | None = None,
+    quest_transport: str = "usb",
+    adb_serial: str | None = None,
+    open_quest: bool = False,
+    start_relay: bool = True,
+    relay_host: str = "127.0.0.1",
+    relay_port: int = 8443,
+    ssl_keyfile: str | None = None,
+    ssl_certfile: str | None = None,
+    quest_url: str | None = None,
+    push_to_hub: bool = False,
+    private: bool = False,
+    backend_factory: Callable[[RigArm], ArmBackend] | None = None,
+    teleop_source: object | None = None,
+    input_fn: Callable[[str], str] = input,
+) -> int:
+    """Record DAgger episodes: MolmoAct drives, the operator takes over on Right B.
+
+    The shape of a session is ``rollout``'s -- prompt, timed attempt, park,
+    label -- with one difference that decides most of the structure: the relay,
+    the USB tunnel, and the headset connection are opened once around the whole
+    run, not per episode. The arms are still de-energized between attempts,
+    because that is what makes resetting a scene by hand safe; but dropping the
+    operator's WebSocket every time would put the headset back through its
+    reconnect exactly when they are reaching into the cell.
+
+    Frames carry an ``intervention`` column and the manifest carries per-attempt
+    takeover counts, so the dataset can be filtered down to the corrections
+    (HG-DAgger) without re-deriving them from timestamps. See
+    :mod:`openpi_control.dagger`.
+    """
+    from . import record as record_mod
+    from .dagger import END_EPISODE_HOLD_S, INTERVENTION_FEATURE, DaggerSource
+    from .teleop_vr import QuestTeleopSource
+
+    if tuple(rig.names) != ("left", "right"):
+        raise ConfigurationError(
+            "DAgger recording requires the packaged bimanual left/right YAM rig"
+        )
+    if episodes <= 0:
+        raise ConfigurationError("--episodes must be positive")
+    if episode_seconds <= 0:
+        raise ConfigurationError("--episode-seconds must be positive")
+    if fps <= 0:
+        raise ConfigurationError("--fps must be positive")
+    if not repo_id.strip():
+        raise ConfigurationError("--repo-id must not be empty")
+    if speed <= 0:
+        raise ConfigurationError("--speed must be positive")
+    if chunk_size is not None and chunk_size <= 0:
+        raise ConfigurationError("--chunk-size must be positive")
+    if chunk_size is not None and chunk_size > MOLMOACT_ACTION_HORIZON:
+        raise ConfigurationError(
+            f"--chunk-size cannot exceed the model horizon ({MOLMOACT_ACTION_HORIZON})"
+        )
+    record_mod.require_lerobot()
+
+    client = MolmoActClient(
+        server,
+        timeout_s=request_timeout_s,
+        num_steps=num_steps,
+        jpeg_quality=jpeg_quality,
+        enable_cuda_graph=enable_cuda_graph,
+    )
+    client.health()
+    capture_rig = rig.with_camera_capture(fps=fps, pixel_format="rgb8")
+    cameras: dict[str, cameras_mod.CameraReader] = {}
+    scene = None
+    camera_panel = None
+    sink: object | None = None
+    manifest: dict[str, object] = {
+        "format": "openpi-control.dagger-v1",
+        "dataset_format": "LeRobot v3.0",
+        "repo_id": repo_id,
+        "instruction_is_per_episode": True,
+        "intervention_column": "intervention",
+        "policy_queried_during_intervention": False,
+        "speed": speed,
+        "chunk_size": (chunk_size if chunk_size is not None else MOLMOACT_ACTION_HORIZON),
+        "episode_seconds": episode_seconds,
+        "fps": fps,
+        "partial_episodes_saved_on_ctrl_c": True,
+        "episodes": [],
+    }
+    manifest_path: Path | None = None
+    status = 0
+    try:
+        cameras = open_inference_cameras(capture_rig, overrides=camera_overrides)
+        shapes = record_mod.camera_shapes(cameras)
+        state_names = record_mod.arm_feature_names(["left", "right"], {"left": 6, "right": 6})
+        features = record_mod.build_features(state_names, shapes, INTERVENTION_FEATURE)
+        sink = record_mod.LeRobotSink(
+            repo_id=repo_id,
+            fps=fps,
+            features=features,
+            robot_type=record_mod.rig_robot_type(rig),
+            root=root,
+            image_writer_threads=4 * len(cameras),
+        )
+        manifest_path = sink.root / "openpi_control_hitl.json"
+        _write_rollout_manifest(manifest_path, manifest)
+        print(f"  dataset  {repo_id} at {sink.root}")
+
+        if visualize:
+            from .viz import ArmSceneVisualizer, CameraPanel
+
+            scene = ArmSceneVisualizer.from_rig(rig, mesh_dir=mesh_dir, port=port)
+            # Pushed on the record loop's clock rather than on each policy
+            # chunk, unlike `rollout`: during an intervention no chunk is
+            # requested, and a preview frozen on the last thing the policy saw
+            # is the opposite of what an operator reaching into the cell wants.
+            camera_panel = CameraPanel(scene.server, cameras, folder="Cameras", max_width=None)
+            print(f"  viser    {scene.url}")
+
+        with quest_bridge(
+            cameras=cameras,
+            transport=quest_transport,
+            adb_serial=adb_serial,
+            open_quest=open_quest,
+            start_relay=start_relay,
+            relay_host=relay_host,
+            relay_port=relay_port,
+            ssl_keyfile=ssl_keyfile,
+            ssl_certfile=ssl_certfile,
+            quest_url=quest_url,
+            vr_url=vr_url,
+        ) as source_url:
+            human = teleop_source
+            try:
+                if human is None:
+                    human = QuestTeleopSource(
+                        ["left", "right"],
+                        ws_url=source_url,
+                        kit_path=vr_kit,
+                        model_path=yam_xml,
+                        config_overrides=teleop_config,
+                        # B and Y mean handoff here, not episode boundaries.
+                        emit_episode_events=False,
+                    )
+                print(f"  teleop   {human.describe()}")
+                print()
+                print("  HANDOFF CONTROLS")
+                print(f"    {DaggerSource.TAKE:<14} take the arms — the policy stops")
+                print(
+                    f"    {DaggerSource.GIVE + ' (tap)':<14} hand back — the policy re-plans"
+                    " and continues"
+                )
+                print(
+                    f"    {DaggerSource.GIVE + ' (hold)':<14} end this attempt now — save, park,"
+                    f" then the y/n prompt ({END_EPISODE_HOLD_S:g}s)"
+                )
+                print("    ctrl-c         the same, from the keyboard")
+                print()
+                status = _hitl_episodes(
+                    rig,
+                    client=client,
+                    human=human,
+                    cameras=cameras,
+                    sink=sink,
+                    scene=scene,
+                    camera_panel=camera_panel,
+                    manifest=manifest,
+                    manifest_path=manifest_path,
+                    episodes=episodes,
+                    episode_seconds=episode_seconds,
+                    fps=fps,
+                    speed=speed,
+                    chunk_size=chunk_size,
+                    max_step_rad=max_step_rad,
+                    max_effector_step=max_effector_step,
+                    carry_targets=carry_targets,
+                    prefetch=prefetch,
+                    prefetch_margin_s=prefetch_margin_s,
+                    wait_between_episodes=wait_between_episodes,
+                    backend_factory=backend_factory,
+                    input_fn=input_fn,
+                )
+            finally:
+                # Before the relay goes down: a bridge whose server vanishes
+                # underneath it reports the disconnect as a failure.
+                if human is not None and teleop_source is None:
+                    human.close()
+    except KeyboardInterrupt:
+        print("\nDAgger session stopped; hardware shutdown completed")
+        status = 1
+    except (ConfigurationError, InferenceError, PiControlError) as err:
+        print(f"hitl stopped: {type(err).__name__}: {err}", file=sys.stderr)
+        status = 1
+    finally:
+        if sink is not None:
+            sink.finalize()  # type: ignore[attr-defined]
+        client.close()
+        cameras_mod.close_readers(cameras)
+        if scene is not None:
+            scene.server.stop()
+
+    if push_to_hub and status == 0 and sink is not None:
+        print(f"pushing {repo_id} to the Hub ({'private' if private else 'public'}) ...")
+        try:
+            sink.push_to_hub(private=private)  # type: ignore[union-attr]
+        except Exception as err:  # noqa: BLE001 - the dataset is already safe on disk
+            print(f"push failed: {type(err).__name__}: {err}", file=sys.stderr)
+            print("the local dataset is complete; retry the upload by hand", file=sys.stderr)
+            status = 1
+        else:
+            print(f"pushed: https://huggingface.co/datasets/{repo_id}")
+    return status
+
+
+def _hitl_episodes(
+    rig: Rig,
+    *,
+    client: MolmoActClient,
+    human: object,
+    cameras: Mapping[str, object],
+    sink: object,
+    scene: object | None,
+    camera_panel: object | None,
+    manifest: dict[str, object],
+    manifest_path: Path | None,
+    episodes: int,
+    episode_seconds: float,
+    fps: int,
+    speed: float,
+    chunk_size: int | None,
+    max_step_rad: float,
+    max_effector_step: float,
+    carry_targets: bool,
+    prefetch: bool,
+    prefetch_margin_s: float,
+    wait_between_episodes: bool,
+    backend_factory: Callable[[RigArm], ArmBackend] | None,
+    input_fn: Callable[[str], str],
+) -> int:
+    """The attempt loop, with the headset and relay already up around it.
+
+    Split out of :func:`run_hitl` only because that function's job is the
+    session -- the things opened once and closed once. This one owns what
+    happens per attempt, which is the part that energizes and parks arms.
+    """
+    from . import record as record_mod
+    from .dagger import DaggerSource, InterventionStats
+
+    status = 0
+    for episode_index in range(1, episodes + 1):
+        if episode_index > 1 and wait_between_episodes:
+            input_fn("Reset the scene to its starting pose, then press Enter to continue: ")
+        prompt = _rollout_prompt(input_fn, episode_index, episodes)
+        print(f"\nEpisode {episode_index}/{episodes}: {prompt!r}")
+
+        session = None
+        live_arms: list[LiveArm] = []
+        source: object | None = None
+        saved_before = sink.num_episodes  # type: ignore[attr-defined]
+        episode_result = None
+        stats = InterventionStats()
+        park_failures = 0
+        gripper = GripperWatch()
+        stalled_grippers: set[str] = set()
+        try:
+            session, live_arms = power_up(rig, float_mode=False, backend_factory=backend_factory)
+            # Before anything reads a state: the policy source treats a stale
+            # one as fatal, and the node has only just started publishing.
+            opening = settle_arm_states(live_arms)
+            # Said before anything moves, exactly as ``infer`` does it. The
+            # Viser render cannot show this -- the packaged YAM URDF bakes the
+            # gripper into link_6 -- so a jaw that disagrees with the number
+            # here is a gripper servo zeroed at the wrong stop, and this is
+            # the only place an operator finds that out before it grips.
+            readings = ", ".join(
+                f"{name} {state.effector.position:.3f}"  # type: ignore[union-attr]
+                for name, state in sorted(opening.items())
+                if state.effector is not None  # type: ignore[union-attr]
+            )
+            if readings:
+                print(f"  gripper  measured now: {readings} (1.0 = open) —"
+                      " check the jaws agree")
+            arm_map = {entry.name: entry.arm for entry in live_arms}
+            limits = {
+                name: (
+                    np.array([spec.lower for spec in scene[name].joint_specs], dtype=np.float64)
+                    if scene is not None
+                    else np.full(6, -np.inf),
+                    np.array([spec.upper for spec in scene[name].joint_specs], dtype=np.float64)
+                    if scene is not None
+                    else np.full(6, np.inf),
+                )
+                for name in ("left", "right")
+            }
+
+            def on_chunk(actions: np.ndarray) -> None:
+                if scene is not None:
+                    scene.update_chunk(split_chunk(actions))
+
+            def on_policy_tick(
+                states: Mapping[str, object],
+                commands: Mapping[str, PositionCommand],
+                consumed: int,
+            ) -> None:
+                del states, commands
+                if scene is not None:
+                    scene.set_chunk_progress(consumed)
+
+            def on_mode_change(human_driving: bool) -> None:
+                # The predicted trail describes a plan that was just abandoned.
+                if scene is not None and human_driving:
+                    scene.clear_chunk()
+
+            policy = InferenceRolloutSource(
+                arms=arm_map,
+                readers=cameras,
+                client=client,
+                instruction=prompt,
+                episode_seconds=episode_seconds,
+                fps=fps,
+                speed=speed,
+                chunk_size=chunk_size,
+                max_step_rad=max_step_rad,
+                max_effector_step=max_effector_step,
+                limits=limits,
+                prefetch=prefetch,
+                prefetch_margin_s=prefetch_margin_s,
+                carry_targets=carry_targets,
+                on_chunk=on_chunk,
+                on_tick=on_policy_tick,
+            )
+            source = DaggerSource(
+                policy=policy,
+                human=human,  # type: ignore[arg-type]
+                episode_seconds=episode_seconds,
+                on_mode_change=on_mode_change,
+            )
+            print(f"  hitl     {source.describe()}")
+
+            # Defined here, after `source`, and binding each per-attempt object
+            # as a default: these are loop variables, and a plain closure over
+            # them would read whatever the *next* attempt had rebound them to.
+            def on_record_tick(
+                states: Mapping[str, object | None],
+                *,
+                driver: DaggerSource = source,
+                gripper: GripperWatch = gripper,
+                stalled: set[str] = stalled_grippers,
+            ) -> None:
+                if scene is not None:
+                    for name, state in states.items():
+                        if state is not None:
+                            scene.update(name, state.joints.position_rad)  # type: ignore[union-attr]
+                if camera_panel is not None:
+                    camera_panel.step(1.0 / fps)  # type: ignore[attr-defined]
+                # An inert gripper is invisible to every other check here: the
+                # node keeps publishing, the joints keep tracking, and only the
+                # jaws are dead. Watched on the record clock rather than on the
+                # policy's, because during an intervention the policy is not
+                # ticking and it is the operator's gripper being commanded.
+                gripper.observe_effectors(
+                    driver.commanded_effector,
+                    states,  # type: ignore[arg-type]
+                )
+                for name in gripper.stalled():
+                    if name in stalled:
+                        continue
+                    # Once per arm: a gripper that is inert stays inert, and a
+                    # line per tick would bury the run.
+                    stalled.add(name)
+                    print(
+                        f"  gripper  {name} is NOT TRACKING: commanded across "
+                        f"{gripper.command_travel:.2f} of its range and the measured "
+                        f"position has not moved once. Check the startup calibration "
+                        f"line in the node log — a stroke it could not measure means "
+                        f"the jaws were blocked when it probed, and the run is using "
+                        f"the configured range instead.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
+            episode_result = record_mod.record_session(
+                arms=arm_map,
+                source=source,  # type: ignore[arg-type]
+                sink=sink,  # type: ignore[arg-type]
+                task=prompt,
+                fps=fps,
+                cameras=cameras,
+                num_episodes=0,
+                finalize=False,
+                save_on_interrupt=True,
+                # Unconditional: it carries the gripper-stall watch, which is a
+                # safety check and not a view, so --no-viz must not switch it off.
+                on_tick=on_record_tick,
+            )
+        finally:
+            if source is not None:
+                # Read before closing: the counts are this attempt's label.
+                stats = source.stats  # type: ignore[attr-defined]
+                source.close()  # type: ignore[attr-defined]
+            if scene is not None:
+                scene.clear_chunk()
+            if session is not None:
+                park_failures = power_down(session, live_arms, park=True)
+
+        if park_failures:
+            print(
+                f"  {park_failures} arm(s) failed to park; stopping before the next episode",
+                file=sys.stderr,
+            )
+            status = 1
+            break
+
+        saved = sink.num_episodes > saved_before  # type: ignore[attr-defined]
+        aborted = episode_result is not None and episode_result.ended_by == "interrupted"
+        if aborted:
+            if saved:
+                print("  episode interrupted; partial frames were saved")
+            else:
+                print("  episode interrupted before a frame was captured")
+        print(f"  handoff  {stats.summary()}")  # type: ignore[attr-defined]
+        success = _rollout_yes_no(input_fn, f"Episode {episode_index} successful? [y/n]: ")
+        if not saved:
+            print("  no LeRobot episode was written for this attempt")
+        entries = manifest["episodes"]
+        assert isinstance(entries, list)
+        entries.append(
+            {
+                "attempt": episode_index,
+                "episode_index": saved_before if saved else None,
+                "prompt": prompt,
+                "success": success,
+                "label": "y" if success else "n",
+                "saved": saved,
+                "aborted": aborted,
+                **stats.as_dict(),  # type: ignore[attr-defined]
+            }
+        )
+        if manifest_path is not None:
+            _write_rollout_manifest(manifest_path, manifest)
+    return status
+
+
+# --------------------------------------------------------------------------- #
 # record
 # --------------------------------------------------------------------------- #
 
@@ -1972,7 +2498,6 @@ def run_collect(
     to the Quest over WebRTC. No device is opened twice.
     """
     from . import record as record_mod
-    from .quest import QuestAdbTunnel, QuestRelay
 
     if dataset_format != "lerobot-v3":
         raise ConfigurationError(f"collect supports LeRobot v3 only, not {dataset_format!r}")
@@ -1980,8 +2505,6 @@ def run_collect(
         record_mod.require_lerobot()
 
     cameras: dict[str, cameras_mod.CameraReader] = {}
-    relay: QuestRelay | None = None
-    adb: QuestAdbTunnel | None = None
     try:
         if rig.cameras:
             discovery = cameras_mod.discover(rig.cameras, overrides=camera_overrides)
@@ -1995,8 +2518,74 @@ def run_collect(
             cameras = cameras_mod.open_readers(discovery.specs())
             print(f"  cameras  {', '.join(cameras)} — shared by dataset, Viser, and Quest")
 
+        with quest_bridge(
+            cameras=cameras,
+            transport=quest_transport,
+            adb_serial=adb_serial,
+            open_quest=open_quest,
+            start_relay=start_relay,
+            relay_host=relay_host,
+            relay_port=relay_port,
+            ssl_keyfile=ssl_keyfile,
+            ssl_certfile=ssl_certfile,
+            quest_url=quest_url,
+            vr_url=vr_url,
+        ) as source_url:
+            return run_record(
+                rig,
+                task=task,
+                repo_id=repo_id,
+                teleop="vr",
+                fps=fps,
+                num_episodes=num_episodes,
+                root=root,
+                dry_run=dry_run,
+                park=park,
+                push_to_hub=push_to_hub,
+                private=private,
+                camera_readers=cameras,
+                vr_url=source_url,
+                yam_xml=yam_xml,
+                visualize=visualize,
+                port=port,
+                mesh_dir=mesh_dir,
+                backend_factory=backend_factory,
+                stop=stop,
+            )
+    finally:
+        cameras_mod.close_readers(cameras)
+
+
+@contextlib.contextmanager
+def quest_bridge(
+    *,
+    cameras: Mapping[str, object],
+    transport: str = "usb",
+    adb_serial: str | None = None,
+    open_quest: bool = False,
+    start_relay: bool = True,
+    relay_host: str = "127.0.0.1",
+    relay_port: int = 8443,
+    ssl_keyfile: str | None = None,
+    ssl_certfile: str | None = None,
+    quest_url: str | None = None,
+    vr_url: str | None = None,
+):  # noqa: ANN201 - a context manager yielding the WebSocket URL
+    """Run the relay and USB tunnel around a session; yield the URL to teleoperate over.
+
+    The camera readers are lent, never owned: the relay publishes to the Quest
+    the same frames the dataset is recording, and whoever opened them closes
+    them. Everything this starts is torn down in the reverse order on the way
+    out, including when the session raises -- an ADB reverse tunnel outliving
+    the process that made it is what a second run then fails on.
+    """
+    from .quest import QuestAdbTunnel, QuestRelay
+
+    relay: QuestRelay | None = None
+    adb: QuestAdbTunnel | None = None
+    try:
         host = relay_host
-        if quest_transport == "lan" and host == "127.0.0.1":
+        if transport == "lan" and host == "127.0.0.1":
             host = "0.0.0.0"
         if start_relay:
             relay = QuestRelay(
@@ -2007,12 +2596,12 @@ def run_collect(
                 camera_readers=cameras,
             )
             relay.start()
-            if quest_transport == "usb":
+            if transport == "usb":
                 print(f"  relay    {relay.page_url} (shared camera publisher)")
             else:
                 print(f"  relay    open https://<workstation-ip>:{relay_port}/ in the Quest")
 
-        if quest_transport == "usb":
+        if transport == "usb":
             adb = QuestAdbTunnel(port=relay_port, serial=adb_serial)
             serial = adb.connect()
             print(f"  quest    USB tunnel ready ({serial})")
@@ -2027,34 +2616,12 @@ def run_collect(
             print(f"  quest    open {quest_url}")
 
         scheme = "wss" if ssl_keyfile or ssl_certfile else "ws"
-        source_url = vr_url or f"{scheme}://127.0.0.1:{relay_port}/ws"
-        return run_record(
-            rig,
-            task=task,
-            repo_id=repo_id,
-            teleop="vr",
-            fps=fps,
-            num_episodes=num_episodes,
-            root=root,
-            dry_run=dry_run,
-            park=park,
-            push_to_hub=push_to_hub,
-            private=private,
-            camera_readers=cameras,
-            vr_url=source_url,
-            yam_xml=yam_xml,
-            visualize=visualize,
-            port=port,
-            mesh_dir=mesh_dir,
-            backend_factory=backend_factory,
-            stop=stop,
-        )
+        yield vr_url or f"{scheme}://127.0.0.1:{relay_port}/ws"
     finally:
         if adb is not None:
             adb.close()
         if relay is not None:
             relay.stop()
-        cameras_mod.close_readers(cameras)
 
 
 def _build_teleop_source(
@@ -2653,6 +3220,168 @@ def main(argv: list[str] | None = None) -> int:
         help="energize without running doctor checks first",
     )
 
+    hitl = sub.add_parser(
+        "hitl",
+        help="record DAgger episodes: MolmoAct drives, Right B hands the arms to the operator",
+    )
+    hitl.add_argument("--rig", default="yam_bimanual", help="the trained bimanual YAM rig")
+    hitl.add_argument(
+        "--interface",
+        action="append",
+        metavar="ARM=IFACE",
+        help="move an arm to a different CAN interface, e.g. left=can_left",
+    )
+    hitl.add_argument(
+        "--repo-id", required=True, help="local/Hub dataset id for the DAgger dataset"
+    )
+    hitl.add_argument("--root", type=Path, default=None, help="local LeRobot dataset directory")
+    hitl.add_argument(
+        "--episodes", type=int, default=3, help="number of attempts (default: 3)"
+    )
+    hitl.add_argument(
+        "--episode-seconds",
+        type=float,
+        default=120.0,
+        help="backstop duration for an attempt you do not end by hand (default: 120)",
+    )
+    hitl.add_argument(
+        "--fps", type=int, default=30, help="recording and action-loop rate (default: 30)"
+    )
+    hitl.add_argument(
+        "--server",
+        default="http://127.0.0.1:8202",
+        help="MolmoAct server URL or host:port; /act is appended automatically",
+    )
+    hitl.add_argument(
+        "--request-timeout",
+        type=float,
+        default=DEFAULT_REQUEST_TIMEOUT_S,
+        help="HTTP inference timeout in seconds (default: 60)",
+    )
+    hitl.add_argument(
+        "--num-steps",
+        type=int,
+        default=DEFAULT_MOLMOACT_NUM_STEPS,
+        help="MolmoAct2 denoising steps requested from the server",
+    )
+    hitl.add_argument(
+        "--no-cuda-graph",
+        dest="cuda_graph",
+        action="store_false",
+        help="stop requesting CUDA graph inference from the server",
+    )
+    hitl.add_argument(
+        "--jpeg-quality",
+        type=int,
+        default=DEFAULT_MOLMOACT_JPEG_QUALITY,
+        help="JPEG quality for policy frames; 0 sends raw frames",
+    )
+    hitl.add_argument(
+        "--raw-frames",
+        dest="jpeg_quality",
+        action="store_const",
+        const=0,
+        help="send raw HxWx3 frames instead of JPEG-encoded frames",
+    )
+    hitl.add_argument(
+        "--speed",
+        type=float,
+        default=0.5,
+        help="play each policy chunk at this fraction of training speed (default: 0.5)",
+    )
+    hitl.add_argument(
+        "--chunk-size",
+        type=int,
+        default=None,
+        help="execute only this prefix of each returned chunk (1-30; default: full chunk)",
+    )
+    hitl.add_argument(
+        "--max-step-rad",
+        type=float,
+        default=DEFAULT_MAX_STEP_RAD,
+        help="maximum joint movement per commanded step",
+    )
+    hitl.add_argument(
+        "--max-effector-step",
+        type=float,
+        default=DEFAULT_MAX_EFFECTOR_STEP,
+        help="maximum normalized gripper movement per commanded step",
+    )
+    hitl.add_argument(
+        "--carry-targets",
+        action="store_true",
+        help="carry commanded targets across policy chunk boundaries",
+    )
+    hitl.add_argument(
+        "--no-prefetch",
+        dest="prefetch",
+        action="store_false",
+        help="infer between chunks instead of during them",
+    )
+    hitl.add_argument(
+        "--prefetch-margin-s",
+        type=float,
+        default=DEFAULT_PREFETCH_MARGIN_S,
+        help="extra margin used when scheduling prefetched chunks",
+    )
+    hitl.add_argument(
+        "--no-reset-pause",
+        dest="wait_between_episodes",
+        action="store_false",
+        help="do not wait for the manual scene reset between attempts",
+    )
+    hitl.add_argument(
+        "--no-viz",
+        dest="visualize",
+        action="store_false",
+        help="record without starting Viser",
+    )
+    hitl.add_argument(
+        "--camera",
+        action="append",
+        metavar="NAME=DEVICE",
+        help="pin one camera to an explicit device",
+    )
+    hitl.add_argument("--port", type=int, default=8080, help="viser HTTP port")
+    hitl.add_argument(
+        "--mesh-dir", type=Path, default=None, help="directory holding the URDF meshes"
+    )
+    hitl.add_argument(
+        "--push-to-hub", action="store_true", help="upload after the arms are down"
+    )
+    hitl.add_argument("--private", action="store_true", help="with --push-to-hub, keep it private")
+    hitl.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="energize without running doctor checks first",
+    )
+    hitl.add_argument("--yam-xml", default=None, help="YAM MJCF the VR IK loads")
+    hitl.add_argument("--vr-url", default=None, help="override the relay WebSocket URL")
+    hitl.add_argument(
+        "--quest-transport",
+        choices=("usb", "lan"),
+        default="usb",
+        help="usb creates an ADB reverse tunnel; lan uses direct HTTPS",
+    )
+    hitl.add_argument(
+        "--adb-serial", default=None, help="ADB serial when several devices are connected"
+    )
+    hitl.add_argument(
+        "--open-quest",
+        action="store_true",
+        help="open the relay page in the Quest browser after creating the USB tunnel",
+    )
+    hitl.add_argument(
+        "--no-relay",
+        action="store_true",
+        help="use an already-running relay instead of the shared in-process relay",
+    )
+    hitl.add_argument("--relay-host", default="127.0.0.1", help="relay bind address")
+    hitl.add_argument("--relay-port", type=int, default=8443, help="relay port")
+    hitl.add_argument("--ssl-keyfile", default=None, help="relay TLS private key")
+    hitl.add_argument("--ssl-certfile", default=None, help="relay TLS certificate")
+    hitl.add_argument("--quest-url", default=None, help="browser URL used by --open-quest")
+
     cams = sub.add_parser(
         "cameras", help="resolve a rig's cameras to device paths and say which are present"
     )
@@ -2913,6 +3642,7 @@ def main(argv: list[str] | None = None) -> int:
         "relay": _command_relay,
         "infer": _command_infer,
         "rollout": _command_rollout,
+        "hitl": _command_hitl,
         "cameras": _command_cameras,
         "record": _command_record,
         "collect": _command_collect,
@@ -3340,6 +4070,94 @@ def _command_rollout(args: argparse.Namespace, log_path: Path) -> int:
         port=args.port,
         mesh_dir=args.mesh_dir,
         wait_between_episodes=args.wait_between_episodes,
+    )
+    print(f"log: {log_path}")
+    return status
+
+
+def _command_hitl(args: argparse.Namespace, log_path: Path) -> int:
+    """Run DAgger attempts: the policy drives, the operator takes over on Right B."""
+    rig = resolve_rig(args.rig).with_interfaces(_parse_interface_overrides(args.interface))
+    if rig.names != ("left", "right"):
+        raise ConfigurationError(
+            "hitl currently supports only the packaged bimanual left/right YAM rig"
+        )
+    if args.relay_port <= 0 or args.relay_port > 65535:
+        raise ConfigurationError(f"--relay-port must be between 1 and 65535, got {args.relay_port}")
+    if args.quest_transport == "lan" and args.open_quest:
+        raise ConfigurationError("--open-quest is only available with --quest-transport usb")
+    if args.quest_transport == "lan" and not args.no_relay:
+        if not (args.ssl_keyfile and args.ssl_certfile):
+            raise ConfigurationError(
+                "LAN Quest WebXR needs TLS; provide --ssl-keyfile and --ssl-certfile, "
+                "or use --quest-transport usb"
+            )
+
+    overrides = cameras_mod.parse_camera_overrides(args.camera)
+    if not args.skip_preflight:
+        failures, reports = preflight_rig(rig)
+        # Cameras are not optional here: the policy is handed all three views
+        # on every request, so a missing one stops the run rather than
+        # narrowing it.
+        camera_results = run_camera_checks(rig, overrides=overrides, required=True)
+        camera_results += check_camera_modes(rig)
+        failures += sum(1 for result in camera_results if result.status == _FAIL)
+        for name, results in reports:
+            problems = [result for result in results if result.status != _OK]
+            summary = "all checks pass" if not problems else f"{len(problems)} to look at"
+            print(f"\npreflight {name}: {summary}")
+            for result in problems:
+                print(result.render())
+        camera_problems = [result for result in camera_results if result.status != _OK]
+        if camera_problems:
+            print("\npreflight cameras:")
+            for result in camera_problems:
+                print(result.render())
+        if failures:
+            print(
+                f"\n{failures} failed check(s); nothing was energized. "
+                "Fix them, or re-run with --skip-preflight.",
+                file=sys.stderr,
+            )
+            return 1
+
+    status = run_hitl(
+        rig,
+        repo_id=args.repo_id,
+        episodes=args.episodes,
+        episode_seconds=args.episode_seconds,
+        fps=args.fps,
+        root=args.root,
+        server=args.server,
+        request_timeout_s=args.request_timeout,
+        num_steps=args.num_steps,
+        enable_cuda_graph=args.cuda_graph,
+        jpeg_quality=args.jpeg_quality,
+        speed=args.speed,
+        chunk_size=args.chunk_size,
+        max_step_rad=args.max_step_rad,
+        max_effector_step=args.max_effector_step,
+        carry_targets=args.carry_targets,
+        prefetch=args.prefetch,
+        prefetch_margin_s=args.prefetch_margin_s,
+        visualize=args.visualize,
+        camera_overrides=overrides,
+        port=args.port,
+        mesh_dir=args.mesh_dir,
+        wait_between_episodes=args.wait_between_episodes,
+        vr_url=args.vr_url,
+        yam_xml=args.yam_xml,
+        quest_transport=args.quest_transport,
+        adb_serial=args.adb_serial,
+        open_quest=args.open_quest,
+        start_relay=not args.no_relay,
+        relay_host=args.relay_host,
+        relay_port=args.relay_port,
+        ssl_keyfile=args.ssl_keyfile,
+        ssl_certfile=args.ssl_certfile,
+        quest_url=args.quest_url,
+        push_to_hub=args.push_to_hub,
+        private=args.private,
     )
     print(f"log: {log_path}")
     return status

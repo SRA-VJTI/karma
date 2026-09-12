@@ -510,6 +510,10 @@ class ChunkPrefetcher:
         self._thread: threading.Thread | None = None
         self._result: np.ndarray | None = None
         self._error: BaseException | None = None
+        # Bumped by drop(). An abandoned request keeps running -- nothing can
+        # cancel an HTTP call in flight -- so it has to be told, when it
+        # finally lands, that nobody wants what it computed.
+        self._generation = 0
 
     @property
     def busy(self) -> bool:
@@ -522,6 +526,7 @@ class ChunkPrefetcher:
             return
         with self._lock:
             self._result = self._error = None
+            generation = self._generation
 
         def _run() -> None:
             started = time.perf_counter()
@@ -529,9 +534,17 @@ class ChunkPrefetcher:
                 actions = self._client.infer(observation, instruction)
             except BaseException as err:  # noqa: BLE001 - re-raised from take()
                 with self._lock:
-                    self._error = err
+                    if generation == self._generation:
+                        self._error = err
                 return
             with self._lock:
+                if generation != self._generation:
+                    # Dropped while this was in flight. Without the check it
+                    # would land in the next request's slot and be executed as
+                    # if it were the answer to a newer observation -- which,
+                    # after a human intervention, means replaying the motion
+                    # the correction just undid.
+                    return
                 self._result = actions
                 # 0.3 EMA: follows a changing link quickly without letting one
                 # slow call dominate the trigger point.
@@ -561,6 +574,7 @@ class ChunkPrefetcher:
         """Abandon an in-flight or unconsumed chunk; it is stale now."""
         self._thread = None
         with self._lock:
+            self._generation += 1
             self._result = self._error = None
 
     def close(self) -> None:
@@ -828,12 +842,29 @@ class GripperWatch:
         commands: Mapping[str, PositionCommand],
         states: Mapping[str, ArmState],
     ) -> None:
-        for name, command in commands.items():
-            if command.effector is not None:
-                self.commanded[name] = float(command.effector)
-                self._extend(self._cmd_span, name, float(command.effector))
+        self.observe_effectors(
+            {name: command.effector for name, command in commands.items()}, states
+        )
+
+    def observe_effectors(
+        self,
+        commanded: Mapping[str, float | None],
+        states: Mapping[str, ArmState | None],
+    ) -> None:
+        """:meth:`observe` for callers holding commanded gripper values directly.
+
+        The DAgger recorder is one. Its two drivers are polled alternately, so
+        no single PositionCommand map covers a tick; what it carries instead is
+        the last effector commanded by whichever of them was driving. States
+        are allowed to be missing here for the same reason -- the recorder
+        observes every loop iteration, including the stalled ones.
+        """
+        for name, effector in commanded.items():
+            if effector is not None:
+                self.commanded[name] = float(effector)
+                self._extend(self._cmd_span, name, float(effector))
         for name, state in states.items():
-            if state.effector is not None:
+            if state is not None and state.effector is not None:
                 self.measured[name] = float(state.effector.position)
                 self._extend(self._meas_span, name, float(state.effector.position))
 
@@ -925,19 +956,44 @@ class BoundedChunkExecutor:
             # Nothing to re-seed: every value is this executor's own
             # integrator, so the next chunk continues from the last command.
             return
-        self._targets = {}
+        self.seed(
+            states,
+            effector=None
+            if previous is None
+            else {name: float(previous[name][-1]) for name in MOLMOACT_ARM_NAMES},
+        )
+
+    def seed(
+        self,
+        states: Mapping[str, ArmState],
+        *,
+        effector: Mapping[str, float] | None = None,
+    ) -> None:
+        """Seed the integrator: joints from measurement, gripper from ``effector``.
+
+        The same split :meth:`reset` argues for, hoisted out so it can also be
+        applied away from a chunk boundary. Handing control back after a human
+        intervention is exactly that case: the arm is somewhere this executor
+        never commanded it, so the joints have to come from the measurement,
+        while the gripper may be squeezing something the human picked up and
+        must come from what was last *commanded*. ``effector`` is that
+        commanded gripper, in native units; without it the measurement is used,
+        which is only right when nothing is being held.
+        """
+        targets: dict[str, np.ndarray] = {}
         for name in MOLMOACT_ARM_NAMES:
             state = states[name]
             if state.effector is None:
                 raise ConfigurationError(f"{name} must publish a YAM gripper state")
             held = (
-                float(state.effector.position)
-                if previous is None
-                else float(previous[name][-1])
+                float(effector[name])
+                if effector is not None and name in effector
+                else float(state.effector.position)
             )
-            self._targets[name] = np.concatenate(
+            targets[name] = np.concatenate(
                 (np.asarray(state.joints.position_rad, dtype=np.float64), [held])
             )
+        self._targets = targets
 
     def step(
         self,

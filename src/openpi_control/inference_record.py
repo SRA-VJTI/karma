@@ -16,11 +16,13 @@ from typing import Any
 
 import numpy as np
 
+from .exceptions import ConfigurationError
 from .inference import (
     DEFAULT_CHUNK_SPEED,
     DEFAULT_MAX_EFFECTOR_STEP,
     DEFAULT_MAX_STEP_RAD,
     DEFAULT_PREFETCH_MARGIN_S,
+    MOLMOACT_ACTION_DIM,
     BoundedChunkExecutor,
     ChunkPrefetcher,
     EncodedFramesUnsupported,
@@ -29,7 +31,6 @@ from .inference import (
     build_observation,
     time_scale,
 )
-from .exceptions import ConfigurationError
 from .record import ArmTarget, EpisodeEvent, TeleopSource, TeleopStep
 from .types import ArmState, PositionCommand
 
@@ -99,7 +100,7 @@ class InferenceRolloutSource(TeleopSource):
         self._prefetcher = ChunkPrefetcher(client) if prefetch else None
         self._episode_started_at: float | None = None
         self._saved = False
-        self._plan = np.empty((0, 14), dtype=np.float64)
+        self._plan = np.empty((0, MOLMOACT_ACTION_DIM), dtype=np.float64)
         self._plan_index = 0
         self._closed = False
 
@@ -124,9 +125,20 @@ class InferenceRolloutSource(TeleopSource):
 
         if time.monotonic() - self._episode_started_at >= self._episode_seconds:
             self._saved = True
-            self._plan = np.empty((0, 14), dtype=np.float64)
+            self._plan = np.empty((0, MOLMOACT_ACTION_DIM), dtype=np.float64)
             return TeleopStep(event=EpisodeEvent.SAVE)
 
+        return TeleopStep(targets=self.act(states), event=event)
+
+    def act(self, states: Mapping[str, ArmState | None]) -> dict[str, ArmTarget]:
+        """One tick of policy-commanded targets, carrying no episode event.
+
+        Split out of :meth:`poll` for the DAgger recorder, which owns the
+        episode clock itself because the policy is not always what is driving:
+        an episode has to end on time while a human is still correcting, and
+        this source must not advance its plan or spend an inference call on a
+        tick whose commands would be thrown away.
+        """
         fresh_states = self._fresh_states(states)
         if self._plan_index >= len(self._plan):
             observation = build_observation(self._arms, self._readers)
@@ -157,7 +169,35 @@ class InferenceRolloutSource(TeleopSource):
         if self._on_tick is not None:
             self._on_tick(fresh_states, commands, self._plan_index)
         self._maybe_prefetch()
-        return TeleopStep(targets=targets, event=event)
+        return targets
+
+    def resume_after_intervention(
+        self,
+        states: Mapping[str, ArmState],
+        *,
+        effector: Mapping[str, float] | None = None,
+    ) -> None:
+        """Take the arms back from a human without carrying anything stale.
+
+        Everything queued here was computed for a world that no longer exists.
+        The remaining actions continue a trajectory from before the correction,
+        and a prefetched chunk was asked for from an observation the human has
+        since invalidated -- replaying either would undo the correction at full
+        speed. Both are dropped, so the next tick re-plans from what the
+        cameras see now.
+
+        The executor is re-seeded here rather than at that next chunk boundary
+        because its own ``reset`` would either carry the human's motion into a
+        bounded step from a stale target, or (with ``carry_targets``) skip
+        re-seeding entirely. ``effector`` is the gripper the human last
+        commanded; see :meth:`~openpi_control.inference.BoundedChunkExecutor.seed`
+        for why it cannot come from the measurement.
+        """
+        self._plan = np.empty((0, MOLMOACT_ACTION_DIM), dtype=np.float64)
+        self._plan_index = 0
+        if self._prefetcher is not None:
+            self._prefetcher.drop()
+        self._executor.seed(states, effector=effector)
 
     def close(self) -> None:
         if self._closed:

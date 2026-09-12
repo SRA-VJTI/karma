@@ -115,7 +115,9 @@ temp/
 # =========================
 # The YAM MJCF and gripper XML are supplied by a local i2rt checkout; the
 # vendored teleop runtime only stores the kinematics integration in this repo.
-i2rt/
+# No trailing slash: the checkout is just as often a symlink to one kept
+# elsewhere on the box, and `i2rt/` matches only a real directory.
+i2rt
 certs/
 cams.env
 MUJOCO_LOG.TXT

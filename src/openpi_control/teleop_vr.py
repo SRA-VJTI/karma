@@ -93,12 +93,18 @@ class QuestTeleopSource:
         connect_timeout_s: float = 5.0,
         config_overrides: Mapping[str, object] | None = None,
         teleoperator: object | None = None,
+        emit_episode_events: bool = True,
     ) -> None:
         """``teleoperator`` injects an already-built (or stand-in) teleoperator.
 
         That seam exists because the adapter carries the gripper inversion and
         the button edge detection -- the two things here most worth testing, and
         the two least testable against a real headset.
+
+        ``emit_episode_events=False`` leaves B and Y alone. A DAgger session
+        spends the same two buttons on taking control and giving it back, and
+        two edge detectors reading one button would have a single press both
+        start an intervention and restart the episode.
         """
         self.arm_names = tuple(arm_names)
         unknown = set(self.arm_names).difference(VR_HANDS)
@@ -137,6 +143,7 @@ class QuestTeleopSource:
                     "`openpi relay`, or point --vr-url at wherever it is listening."
                 ) from err
         self._seeded = False
+        self._emit_episode_events = bool(emit_episode_events)
         # Both buttons are reported as levels, so the bridge does its own edge
         # detection: holding a button must not restart an episode every tick.
         self._last_start = False
@@ -145,12 +152,25 @@ class QuestTeleopSource:
     def describe(self) -> str:
         return f"Quest teleoperator via {self._ws_url} (arms: {', '.join(self.arm_names)})"
 
-    def seed_from(self, states: Mapping[str, ArmState | None]) -> bool:
+    def seed_from(
+        self,
+        states: Mapping[str, ArmState | None],
+        *,
+        effector: Mapping[str, float] | None = None,
+    ) -> bool:
         """Anchor the IK at the arms' measured pose.
 
         Returns False when no arm has reported yet, so the caller can wait
         rather than seed the solver with zeros -- which would make the first
         command a move to the folded park pose.
+
+        ``effector`` overrides the measured gripper with what was last
+        *commanded*, in native units. It is what a mid-episode handoff needs: a
+        gripper holding something reads short of the value that closed it --
+        that is what holding looks like -- so seeding the operator's trigger
+        from the measurement hands them a grip that is already giving way, and
+        the object drops on the first tick they take over. The joints still
+        come from the measurement, because that is genuinely where the arm is.
         """
         observation: dict[str, float] = {}
         missing = []
@@ -162,12 +182,18 @@ class QuestTeleopSource:
             positions = state.joints.position_rad
             for index in range(min(VR_ARM_DOFS, len(positions))):
                 observation[f"{name}_joint_{index + 1}.pos"] = float(positions[index])
-            if state.effector is not None:
+            commanded = None if effector is None else effector.get(name)
+            held: float | None = None
+            if commanded is not None:
+                held = float(commanded)
+            elif state.effector is not None:
+                held = float(state.effector.position)
+            if held is not None:
                 # Going the other way from poll(): the teleoperator speaks the
                 # dataset convention, and this reading is native. Numerically
                 # the same flip, but naming the direction is the only thing
                 # keeping either call site readable.
-                observation[f"{name}_gripper.pos"] = to_dataset_gripper(state.effector.position)
+                observation[f"{name}_gripper.pos"] = to_dataset_gripper(held)
         # The solver starts at its configured rest pose. Seeding from only one
         # side of a bimanual cell would silently leave the other side at rest,
         # so wait until every selected follower has published a real pose.
@@ -184,7 +210,7 @@ class QuestTeleopSource:
             # where that is.
             return TeleopStep()
 
-        event = self._read_event()
+        event = self._read_event() if self._emit_episode_events else EpisodeEvent.NONE
         action = self._teleop.get_action()
         self._publish_effector_feedback(action, states)
         targets: dict[str, ArmTarget] = {}
@@ -231,6 +257,22 @@ class QuestTeleopSource:
         if torques:
             send_feedback({"torques": torques})
 
+    def right_b(self) -> bool:
+        """Level of the right controller's B button.
+
+        Named for the hardware rather than for a meaning, because it has three
+        of them: vr-teleop-kit calls it pause/resume, recording calls it start,
+        and DAgger calls it take-over. Reported as a level -- the kit's reader
+        thread keeps it current whether or not anyone is calling
+        :meth:`get_action`, which is what lets a consumer that is *not* driving
+        the arms still see the press. Edge detection belongs to the caller.
+        """
+        return bool(self._teleop.is_pause_pressed())
+
+    def left_y(self) -> bool:
+        """Level of the left controller's Y button. See :meth:`right_b`."""
+        return bool(self._teleop.is_reverse_pressed())
+
     def _read_event(self) -> EpisodeEvent:
         """Map the two controller buttons to an episode event, on their edges.
 
@@ -238,8 +280,8 @@ class QuestTeleopSource:
         is vr-teleop-kit's binding, kept identical so muscle memory carries over
         between the two recorders.
         """
-        start = bool(self._teleop.is_pause_pressed())
-        save = bool(self._teleop.is_reverse_pressed())
+        start = self.right_b()
+        save = self.left_y()
         rising_start, rising_save = start and not self._last_start, save and not self._last_save
         self._last_start, self._last_save = start, save
         if rising_start:

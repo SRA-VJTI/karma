@@ -318,3 +318,59 @@ def test_the_description_names_the_relay_and_the_arms() -> None:
 
     assert "left" in vr.describe()
     assert "ws://" in vr.describe()
+
+
+# --------------------------------------------------------------------------- #
+# handing control over mid-episode
+# --------------------------------------------------------------------------- #
+
+
+def test_a_handoff_seeds_the_gripper_that_was_commanded_not_the_one_measured() -> None:
+    # A jaw holding something reads short of the value that closed it. Seed the
+    # operator's trigger from that measurement and they inherit a grip already
+    # giving way; the object drops on the first tick they take over.
+    vr, teleop = source()
+
+    assert vr.seed_from(
+        {"left": state(effector=0.4), "right": state(effector=0.4)},
+        effector={"left": NATIVE_GRIPPER_CLOSED, "right": NATIVE_GRIPPER_CLOSED},
+    )
+
+    assert teleop.seeds[0]["left_gripper.pos"] == DATASET_GRIPPER_CLOSED
+
+
+def test_a_handoff_still_anchors_the_joints_where_the_arm_actually_is() -> None:
+    # Only the gripper comes from the command. The joints are where the arm is,
+    # and seeding the solver anywhere else makes its first output a move.
+    vr, teleop = source()
+
+    vr.seed_from(
+        {"left": state(position=0.33), "right": state(position=0.33)},
+        effector={"left": NATIVE_GRIPPER_CLOSED, "right": NATIVE_GRIPPER_CLOSED},
+    )
+
+    assert teleop.seeds[0]["left_joint_1.pos"] == pytest.approx(0.33)
+
+
+def test_the_buttons_can_be_read_as_levels_without_being_spent() -> None:
+    # A DAgger session spends B and Y on handoff. It reads them through these,
+    # while the source itself stays out of the episode state machine.
+    vr, teleop = source()
+
+    assert (vr.right_b(), vr.left_y()) == (False, False)
+    teleop.start_pressed = True
+    teleop.save_pressed = True
+    assert (vr.right_b(), vr.left_y()) == (True, True)
+
+
+def test_a_dagger_session_leaves_the_episode_buttons_alone() -> None:
+    # Two edge detectors on one button would have a single press both take the
+    # arms and restart the episode.
+    teleop = FakeTeleoperator()
+    teleop.start_pressed = True
+    vr = QuestTeleopSource(("left", "right"), teleoperator=teleop, emit_episode_events=False)
+
+    step = vr.poll({"left": state(), "right": state()})
+
+    assert step.event is EpisodeEvent.NONE
+    assert step.targets, "it still drives the arms; only the events are suppressed"

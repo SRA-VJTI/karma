@@ -910,3 +910,59 @@ def test_a_camera_that_does_not_say_its_format_is_assumed_bgr() -> None:
 
     assert needs_rgb_conversion(Nameless())
     assert not needs_rgb_conversion(type("C", (), {"pixel_format": "rgb8"})())
+
+
+# --------------------------------------------------------------------------- #
+# extra columns
+# --------------------------------------------------------------------------- #
+
+
+def test_a_source_can_add_a_column_to_every_frame_it_records() -> None:
+    # What only the source knows -- who was driving this tick -- has to reach
+    # the dataset, and it can only do so per frame.
+    _, sink, _ = run(
+        [
+            TeleopStep(
+                targets={"left": target()},
+                event=EpisodeEvent.START,
+                extras={"intervention": np.float32([0.0])},
+            ),
+            TeleopStep(
+                targets={"left": target()},
+                extras={"intervention": np.float32([1.0])},
+            ),
+            TeleopStep(targets={"left": target()}, event=EpisodeEvent.SAVE),
+        ]
+    )
+
+    written = [frame["intervention"][0] for frame in sink.episodes[0]]
+    assert written == [0.0, 1.0]
+
+
+def test_an_extra_column_may_not_overwrite_a_recorded_one() -> None:
+    # Adding a column is safe; silently replacing the measured state or the
+    # commanded action with something a source made up is not.
+    for name in ("observation.state", "action", "task", "observation.images.top"):
+        with pytest.raises(ConfigurationError, match="may not overwrite"):
+            TeleopStep(extras={name: 1.0})
+
+
+def test_the_schema_declares_extra_columns_alongside_the_recorded_ones() -> None:
+    features = build_features(
+        ["left_joint_1", "left_gripper"],
+        {"top": (32, 32, 3)},
+        {"intervention": {"dtype": "float32", "shape": (1,), "names": ["intervention"]}},
+    )
+
+    assert features["intervention"]["shape"] == (1,)
+    assert set(features) == {
+        "observation.state",
+        "action",
+        "observation.images.top",
+        "intervention",
+    }
+
+
+def test_an_extra_feature_cannot_shadow_a_recorded_feature() -> None:
+    with pytest.raises(ConfigurationError, match="collides"):
+        build_features(["left_gripper"], {}, {"action": {"dtype": "float32", "shape": (1,)}})
