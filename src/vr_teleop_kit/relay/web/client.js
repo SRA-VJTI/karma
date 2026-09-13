@@ -299,6 +299,7 @@
   const ws = new WebSocket(wsUrl);
 
   ws.onopen    = () => {
+    wsSend({ type: "request_settings" });
     ui.wsState = "open"; refreshPill(); append("ws open");
     // Push the operator's persisted slider values to the teleop so it
     // matches the UI from tick 1 (instead of running on dataclass defaults
@@ -350,7 +351,21 @@
         // so it doesn't run on stale dataclass defaults. Without this, any
         // changes made on the page *before* the teleop started would be
         // invisible to it.
-        append("teleop requested settings snapshot — pushing");
+        if (!data.robot_model) return;
+        robotModel = data.robot_model;
+        SETTINGS_KEY = robotModel === "Yam" ? "vrteleop:settings_v1" : `vrteleop:settings_v1:${robotModel}`;
+        storedSettings = {};
+        try { storedSettings = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") || {}; } catch (_) {}
+        for (const p of params) {
+          if (typeof data.config?.[p.key] === "number") p.defaultVal = data.config[p.key];
+          setSliderValue(p, typeof storedSettings[p.key] === "number" ? storedSettings[p.key] : p.defaultVal);
+        }
+        for (const t of paramToggles) {
+          if (typeof data.config?.[t.key] === "boolean") t.defaultVal = data.config[t.key];
+          t.input.checked = typeof storedSettings[t.key] === "boolean" ? storedSettings[t.key] : t.defaultVal;
+          applyBodyToggleClass(t.key, t.input.checked);
+        }
+        append(`${robotModel} teleop settings — pushing`);
         pushSettingsSnapshot();
       } else if (data.type === "camera_list") {
         cameras.onList(data.cameras || []);
@@ -574,7 +589,8 @@
   // initial values on WS open so a fresh process reflects whatever the
   // operator last tuned, rather than silently snapping back to the CLI
   // defaults.
-  const SETTINGS_KEY = "vrteleop:settings_v1";
+  let robotModel = "Yam";
+  let SETTINGS_KEY = "vrteleop:settings_v1";
   // Slider params (continuous range inputs). Toggles are handled below.
   const params = Array.from(
     document.querySelectorAll(".param[data-key]:not(.param-toggle)")
@@ -651,7 +667,7 @@
     // Mark non-default values so the operator sees at a glance which knobs
     // have been touched. (CSS could highlight; here we just keep the data.)
     p.row.dataset.modified = (v !== p.defaultVal) ? "1" : "0";
-    if (send) wsSend({ type: "config_update", config: { [p.key]: v } });
+    if (send) wsSend({ type: "config_update", robot_model: robotModel, config: { [p.key]: v } });
   };
   // Hydrate from localStorage (fall back to default).
   let storedSettings = {};
@@ -684,7 +700,7 @@
     applyBodyToggleClass(t.key, v);
     t.input.addEventListener("change", () => {
       const v2 = t.input.checked;
-      wsSend({ type: "config_update", config: { [t.key]: v2 } });
+      wsSend({ type: "config_update", robot_model: robotModel, config: { [t.key]: v2 } });
       applyBodyToggleClass(t.key, v2);
       const next = { ...storedSettings, [t.key]: v2 };
       storedSettings = next;
@@ -710,7 +726,7 @@
     const snap = {};
     for (const p of params) snap[p.key] = parseFloat(p.input.value);
     for (const t of paramToggles) snap[t.key] = !!t.input.checked;
-    wsSend({ type: "config_update", config: snap });
+    wsSend({ type: "config_update", robot_model: robotModel, config: snap });
   };
   resetSettingsBtn.addEventListener("click", () => {
     storedSettings = {};

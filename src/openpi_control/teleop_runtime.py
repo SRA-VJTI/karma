@@ -60,11 +60,14 @@ def run_teleop(
         raise ConfigurationError("--rate must be positive")
     if max_state_age_s <= 0:
         raise ConfigurationError("max_state_age_s must be positive")
-    if any(arm.model != "Yam" for arm in rig.arms):
-        raise ConfigurationError(
-            "Quest teleoperation currently supports the packaged Yam model only; "
-            "the vendored IK is YAM-specific"
-        )
+    models = {arm.model for arm in rig.arms}
+    if len(models) != 1 or not models.issubset({"Yam", "SO101"}):
+        raise ConfigurationError("Quest teleoperation needs an all-YAM or all-SO101 rig")
+    robot_model = next(iter(models))
+    if robot_model == "SO101" and model_path:
+        raise ConfigurationError("SO101 uses its packaged URDF; --yam-xml is YAM-only")
+    if any(not arm.is_follower for arm in rig.arms):
+        raise ConfigurationError("Quest teleoperation needs follower arms only")
     if any(arm.name not in {"left", "right"} for arm in rig.arms):
         raise ConfigurationError("Quest teleoperation requires left/right arm names")
 
@@ -92,6 +95,7 @@ def run_teleop(
         source = QuestTeleopSource(
             tuple(arms),
             ws_url=ws_url,
+            robot_model=robot_model,
             model_path=model_path,
             config_overrides=config_overrides,
         )

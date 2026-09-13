@@ -22,6 +22,10 @@ communicates with the Python operator process over ZeroMQ.
 | `SO101` | 5 | USB serial | `E_SO101` | — |
 | `Trossen_wai_ctrl` | 6 | Ethernet controller | `E_Trossen_ctrl` | — |
 
+SO101 Quest teleoperation is available through `openpi teleop --rig so101`.
+See [SO101 setup and controller instructions](docs/so101-teleop.md) for single-arm
+and bimanual commands, calibration conventions, and tuning.
+
 ```python
 from openpi_control import ArmConfig, ArmSession, PositionCommand, SocketCanConnection
 

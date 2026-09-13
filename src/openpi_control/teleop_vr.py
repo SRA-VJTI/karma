@@ -2,7 +2,7 @@
 
 The vendored :mod:`vr_teleop_kit` package solves the hard half of VR
 teleoperation: the WebXR relay, clutch-relative pose mapping, and a damped IK
-solver tuned for the YAM's wrist. This module is the boundary between that
+solver selected for YAM or SO101. This module is the boundary between that
 package and :mod:`openpi_control`: it turns the Quest action stream into the
 native stack's :class:`~openpi_control.record.TeleopSource` protocol, so the
 headset drives arms through ``pi_control_node`` rather than through the kit's
@@ -14,12 +14,12 @@ optional i2rt example driver.
              |  joint targets
         QuestTeleopSource    (this module)
              |  PositionCommand
-        FollowerArm -> pi_control_node -> CAN -> YAM
+        FollowerArm -> pi_control_node -> CAN/serial -> YAM/SO101
 
 The YAM MJCF is still supplied by the i2rt model tree because it is a robot
 model asset, not a Python dependency. Set ``YAM_XML`` or place an i2rt checkout
 at ``./i2rt``. ``openpi teleop`` starts the vendored relay and can establish the
-Quest USB tunnel itself.
+Quest USB tunnel itself. SO101 loads its packaged URDF and needs no i2rt model.
 
 Three things that will otherwise cost you a session
 ---------------------------------------------------
@@ -88,6 +88,7 @@ class QuestTeleopSource:
         arm_names: Sequence[str],
         *,
         ws_url: str = DEFAULT_WS_URL,
+        robot_model: str = "Yam",
         kit_path: Path | None = None,
         model_path: str | None = None,
         connect_timeout_s: float = 5.0,
@@ -106,6 +107,12 @@ class QuestTeleopSource:
         two edge detectors reading one button would have a single press both
         start an intervention and restart the episode.
         """
+        if robot_model not in ("Yam", "SO101"):
+            raise ConfigurationError(f"unsupported Quest robot model: {robot_model}")
+        if robot_model == "SO101" and model_path:
+            raise ConfigurationError("SO101 uses its packaged URDF; --yam-xml is YAM-only")
+        self.robot_model = robot_model
+        self.arm_dofs = 5 if robot_model == "SO101" else VR_ARM_DOFS
         self.arm_names = tuple(arm_names)
         unknown = set(self.arm_names).difference(VR_HANDS)
         if unknown:
@@ -124,6 +131,7 @@ class QuestTeleopSource:
             config_kwargs.update(
                 {
                     "ws_url": ws_url,
+                    "robot_model": robot_model,
                     "connect_timeout_s": connect_timeout_s,
                 }
             )
@@ -150,7 +158,10 @@ class QuestTeleopSource:
         self._last_save = False
 
     def describe(self) -> str:
-        return f"Quest teleoperator via {self._ws_url} (arms: {', '.join(self.arm_names)})"
+        return (
+            f"Quest teleoperator via {self._ws_url} "
+            f"({self.robot_model}; arms: {', '.join(self.arm_names)})"
+        )
 
     def seed_from(
         self,
@@ -180,7 +191,12 @@ class QuestTeleopSource:
                 missing.append(name)
                 continue
             positions = state.joints.position_rad
-            for index in range(min(VR_ARM_DOFS, len(positions))):
+            if len(positions) != self.arm_dofs:
+                raise ConfigurationError(
+                    f"{name}: {self.robot_model} expects {self.arm_dofs} measured joints, "
+                    f"got {len(positions)}"
+                )
+            for index in range(self.arm_dofs):
                 observation[f"{name}_joint_{index + 1}.pos"] = float(positions[index])
             commanded = None if effector is None else effector.get(name)
             held: float | None = None
@@ -199,7 +215,10 @@ class QuestTeleopSource:
         # so wait until every selected follower has published a real pose.
         if missing or not observation:
             return False
-        self._teleop.seed_qpos_from_obs(observation)
+        try:
+            self._teleop.seed_qpos_from_obs(observation)
+        except ValueError as err:
+            raise ConfigurationError(f"cannot initialize Quest teleop: {err}") from err
         self._seeded = True
         return True
 
@@ -217,14 +236,14 @@ class QuestTeleopSource:
         for name in self.arm_names:
             try:
                 joints = tuple(
-                    float(action[f"{name}_joint_{index + 1}.pos"]) for index in range(VR_ARM_DOFS)
+                    float(action[f"{name}_joint_{index + 1}.pos"]) for index in range(self.arm_dofs)
                 )
             except KeyError as err:
                 # A partial action is a protocol change, not a transient: better
                 # to name the missing key than to command an arm from half a pose.
                 raise ConfigurationError(
                     f"the Quest teleoperator returned no {err.args[0]} for arm "
-                    f"{name!r}; it should emit {VR_ARM_DOFS} joints per arm"
+                    f"{name!r}; it should emit {self.arm_dofs} joints per arm"
                 ) from err
             gripper = action.get(f"{name}_gripper.pos")
             targets[name] = ArmTarget(
@@ -293,7 +312,7 @@ class QuestTeleopSource:
     def close(self) -> None:
         try:
             self._teleop.disconnect()
-        except Exception:  # noqa: BLE001 - teardown must not mask a session result
+        except (Exception, KeyboardInterrupt):  # teardown must reach native power-down
             pass
 
 

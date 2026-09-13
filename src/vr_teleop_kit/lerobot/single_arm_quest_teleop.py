@@ -44,6 +44,7 @@ class SingleArmQuestTeleoperatorConfig(BiQuestTeleoperatorConfig):
     arm: str = "right"
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if self.arm not in ("left", "right"):
             raise ValueError(
                 f"SingleArmQuestTeleoperatorConfig.arm must be 'left' or 'right', got {self.arm!r}"
@@ -71,7 +72,9 @@ class SingleArmQuestTeleoperator(Teleoperator):
 
     @property
     def action_features(self) -> dict[str, type]:
-        feats: dict[str, type] = {f"joint_{j}.pos": float for j in range(1, 7)}
+        feats: dict[str, type] = {
+            f"joint_{j}.pos": float for j in range(1, self._inner.arm_dofs + 1)
+        }
         feats["gripper.pos"] = float
         return feats
 

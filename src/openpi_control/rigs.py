@@ -331,7 +331,25 @@ def _yam_bimanual() -> Rig:
     )
 
 
-PACKAGED_RIGS: dict[str, Rig] = {rig.name: rig for rig in (_yam_bimanual(),)}
+def _so101(*, bimanual: bool = False) -> Rig:
+    hands = ("left", "right") if bimanual else ("right",)
+    return Rig(
+        name="so101_bimanual" if bimanual else "so101",
+        description="SO101 Quest follower arms over USB serial",
+        arms=tuple(
+            RigArm(
+                name=hand, model="SO101", interface=f"/dev/ttyACM{index}",
+                effector_model="E_SO101",
+                base_position=(0.0, (0.2 if hand == "left" else -0.2) if bimanual else 0.0, 0.0),
+            )
+            for index, hand in enumerate(hands)
+        ),
+    )
+
+
+PACKAGED_RIGS: dict[str, Rig] = {
+    rig.name: rig for rig in (_yam_bimanual(), _so101(), _so101(bimanual=True))
+}
 
 
 def rig_names() -> tuple[str, ...]:

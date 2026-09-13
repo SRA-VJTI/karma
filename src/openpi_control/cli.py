@@ -2756,7 +2756,7 @@ def _add_teleop_ik_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _parse_rest_pose(raw: str | None, *, env_var: str) -> list[float] | None:
+def _parse_rest_pose(raw: str | None, *, env_var: str, dofs: int = 6) -> list[float] | None:
     """Parse a six/seven-value YAM rest pose, including the kit's env format."""
     value = raw if raw is not None else os.environ.get(env_var)
     if not value or not value.strip():
@@ -2767,12 +2767,13 @@ def _parse_rest_pose(raw: str | None, *, env_var: str) -> list[float] | None:
         raise ConfigurationError(
             f"{env_var} / rest pose must contain comma-separated numbers, got {value!r}"
         ) from err
-    if len(parts) not in (6, 7):
+    if len(parts) not in (dofs, dofs + 1):
         raise ConfigurationError(
-            f"{env_var} / rest pose must contain 6 joints or 7 values including gripper; "
+            f"{env_var} / rest pose must contain {dofs} joints "
+            f"or {dofs + 1} values including gripper; "
             f"got {len(parts)}"
         )
-    return parts[:6]
+    return parts[:dofs]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2884,7 +2885,7 @@ def main(argv: list[str] | None = None) -> int:
 
     teleop = sub.add_parser(
         "teleop",
-        help="drive a YAM follower from a Meta Quest using the vendored VR stack",
+        help="drive YAM or SO101 followers from a Meta Quest",
     )
     teleop.add_argument("--rig", default="yam_bimanual", help=f"one of: {', '.join(rig_names())}")
     teleop.add_argument(
@@ -2922,13 +2923,13 @@ def main(argv: list[str] | None = None) -> int:
         "--rest-pose-left",
         default=None,
         metavar="Q1,...,Q6[,GRIP]",
-        help="left IK rest pose; six or seven comma-separated values",
+        help="left IK rest pose: 5 SO101 or 6 YAM joint angles, optional gripper",
     )
     teleop.add_argument(
         "--rest-pose-right",
         default=None,
         metavar="Q1,...,Q6[,GRIP]",
-        help="right IK rest pose; six or seven comma-separated values",
+        help="right IK rest pose: 5 SO101 or 6 YAM joint angles, optional gripper",
     )
     teleop.add_argument(
         "--no-park",
@@ -3926,6 +3927,8 @@ def _default_quest_page(args: argparse.Namespace) -> str:
 
 
 def _teleop_config(args: argparse.Namespace) -> dict[str, object]:
+    rig = resolve_rig(args.rig)
+    dofs = 5 if all(arm.model == "SO101" for arm in rig.arms) else 6
     config: dict[str, object] = {"id": args.teleop_id}
     for _, dest, _ in _TELEOP_IK_FIELDS:
         value = getattr(args, dest)
@@ -3940,19 +3943,23 @@ def _teleop_config(args: argparse.Namespace) -> dict[str, object]:
     if args.no_force_haptics:
         config["force_haptic_enabled"] = False
 
-    left_rest = _parse_rest_pose(args.rest_pose_left, env_var="LEFT_REST_POSE")
-    right_rest = _parse_rest_pose(args.rest_pose_right, env_var="RIGHT_REST_POSE")
+    left_rest = _parse_rest_pose(args.rest_pose_left, env_var="LEFT_REST_POSE", dofs=dofs)
+    right_rest = _parse_rest_pose(args.rest_pose_right, env_var="RIGHT_REST_POSE", dofs=dofs)
     if left_rest is not None:
         config["rest_qpos_left"] = left_rest
     if right_rest is not None:
         config["rest_qpos_right"] = right_rest
 
     if args.max_dq_pos is not None or args.max_dq_rot is not None:
-        position_cap = args.max_dq_pos if args.max_dq_pos is not None else 0.06
-        rotation_cap = args.max_dq_rot if args.max_dq_rot is not None else 0.24
+        position_cap = (
+            args.max_dq_pos if args.max_dq_pos is not None else (0.02 if dofs == 5 else 0.06)
+        )
+        rotation_cap = (
+            args.max_dq_rot if args.max_dq_rot is not None else (0.02 if dofs == 5 else 0.24)
+        )
         config["max_dq_per_joint_scalar_pos"] = position_cap
         config["max_dq_per_joint_scalar_rot"] = rotation_cap
-        config["max_dq_per_joint"] = [position_cap] * 3 + [rotation_cap] * 3
+        config["max_dq_per_joint"] = [position_cap] * 3 + [rotation_cap] * (dofs - 3)
     return config
 
 

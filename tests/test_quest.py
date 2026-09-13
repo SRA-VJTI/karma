@@ -283,3 +283,15 @@ def test_relay_accepts_rgb_collection_readers_without_owning_them() -> None:
         assert track._av_format == "rgb24"
     finally:
         server.configure_camera_readers(None)
+
+
+@pytest.mark.parametrize("serial", [None, "quest-a"])
+def test_adb_tunnel_distinguishes_linux_permissions_from_authorization(monkeypatch, serial):
+    monkeypatch.setattr(
+        quest, "_run_adb",
+        lambda args: adb_result(
+            "List of devices attached\nquest-a\tno permissions (missing udev rules?)\n"
+        ),
+    )
+    with pytest.raises(ConfigurationError, match="Linux USB permissions.*udev"):
+        quest.QuestAdbTunnel(port=8443, serial=serial).connect()

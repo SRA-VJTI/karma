@@ -68,7 +68,22 @@ class QuestAdbTunnel:
                 continue
             fields = line.split()
             if len(fields) >= 2:
-                devices[fields[0]] = fields[1]
+                devices[fields[0]] = (
+                    "no permissions" if fields[1:3] == ["no", "permissions"] else fields[1]
+                )
+
+        permission_denied = [
+            serial for serial, state in devices.items()
+            if state == "no permissions" and (self.serial is None or serial == self.serial)
+        ]
+        if permission_denied and (self.serial is not None or "device" not in devices.values()):
+            raise ConfigurationError(
+                "Linux USB permissions block Quest ADB access for "
+                + ", ".join(permission_denied)
+                + "; install scripts/udev/51-meta-quest.rules into /etc/udev/rules.d/ "
+                "with sudo, run `sudo udevadm control --reload-rules`, then unplug "
+                "and reconnect the headset. This is a host udev permissions issue."
+            )
 
         if self.serial is not None:
             state = devices.get(self.serial)
