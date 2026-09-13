@@ -311,9 +311,7 @@ def build_features(
         }
     for name, spec in (extra or {}).items():
         if name in features:
-            raise ConfigurationError(
-                f"extra feature {name!r} collides with a recorded column"
-            )
+            raise ConfigurationError(f"extra feature {name!r} collides with a recorded column")
         features[name] = dict(spec)
     return features
 
@@ -439,6 +437,7 @@ def record_session(
     episode_controls: EpisodeControlHints | None = None,
     finalize: bool = True,
     save_on_interrupt: bool = False,
+    command_limits: Mapping[str, tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> RecordResult:
     """Drive the arms from ``source`` and write episodes to ``sink``.
 
@@ -612,25 +611,32 @@ def record_session(
                 continue
             consecutive_stalls = 0
 
-            for name, target in step.targets.items():
-                arm = arms.get(name)
-                if arm is None:
+            targets = dict(step.targets)
+            commands = {}
+            for name, target in targets.items():
+                if name not in arms:
                     raise ConfigurationError(
                         f"teleop source commanded unknown arm {name!r}; "
                         f"this session holds {', '.join(arm_names)}"
                     )
-                arm.command(  # type: ignore[attr-defined]
-                    PositionCommand(
-                        position_rad=np.asarray(target.position_rad, dtype=np.float64),
-                        effector=target.effector,
-                    )
-                )
+                positions = np.asarray(target.position_rad, dtype=np.float64)
+                if positions.shape != (dofs[name],) or not np.all(np.isfinite(positions)):
+                    raise ConfigurationError(f"invalid joint targets for {name}")
+                if command_limits is not None:
+                    lower, upper = command_limits[name]
+                    positions = np.clip(positions, lower, upper)
+                targets[name] = ArmTarget(tuple(positions), target.effector)
+                commands[name] = PositionCommand(positions, target.effector)
+            # Validate the full command map before moving either arm. Record
+            # the bounded targets actually sent, including human HITL targets.
+            for name, command in commands.items():
+                arms[name].command(command)  # type: ignore[attr-defined]
 
             if recording:
                 observation = observation_vector(arm_names, states, dofs)
                 frame: dict[str, object] = {
                     "observation.state": observation,
-                    "action": action_vector(arm_names, step.targets, observation, dofs),
+                    "action": action_vector(arm_names, targets, observation, dofs),
                     "task": task,
                 }
                 # Validated against the recorded columns when the step was
@@ -851,6 +857,45 @@ class LeRobotSink:
         if self.num_episodes == 0:
             raise ConfigurationError("nothing to push: no episode was saved")
         self._dataset.push_to_hub(private=private, tags=["robotics", "lerobot", "openpi-control"])
+
+
+class ReviewSink:
+    """Keep one completed take in the underlying buffer until operator review.
+
+    Frames still stream to the real sink; this wrapper does not copy video
+    into memory. The virtual count lets the recording loop finish normally.
+    """
+
+    def __init__(self, sink: EpisodeSink) -> None:
+        self.sink = sink
+        self.pending = False
+
+    @property
+    def num_episodes(self) -> int:
+        return self.sink.num_episodes + int(self.pending)
+
+    def add_frame(self, frame: dict[str, object]) -> None:
+        if self.pending:
+            raise ConfigurationError("review the completed episode before recording another")
+        self.sink.add_frame(frame)
+
+    def save_episode(self) -> None:
+        if self.pending:
+            raise ConfigurationError("an episode is already awaiting review")
+        self.pending = True
+
+    def commit(self) -> None:
+        if self.pending:
+            self.sink.save_episode()
+            self.pending = False
+
+    def discard_episode(self) -> None:
+        self.sink.discard_episode()
+        self.pending = False
+
+    def finalize(self) -> None:
+        self.commit()
+        self.sink.finalize()
 
 
 class MemorySink:

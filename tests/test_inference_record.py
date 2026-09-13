@@ -220,3 +220,131 @@ def test_the_policy_takes_the_arms_back_holding_what_the_human_was_holding() -> 
     # the first commanded effector is within one step of 0.05 rather than 0.5.
     assert targets["left"].effector is not None
     assert abs(targets["left"].effector - 0.05) <= inference.DEFAULT_MAX_EFFECTOR_STEP
+
+
+def _aged(name: str, age_s: float) -> ArmState:
+    """A state received ``age_s`` ago."""
+    state = _state(name)
+    return ArmState(
+        name=state.name,
+        role=state.role,
+        joints=state.joints,
+        effector=state.effector,
+        monotonic_timestamp=time.monotonic() - age_s,
+        wall_timestamp=state.wall_timestamp,
+        sequence=state.sequence,
+        mode=state.mode,
+    )
+
+
+def test_a_brief_state_gap_skips_the_tick_instead_of_ending_the_session() -> None:
+    """A 264 ms gap once killed a 50-attempt run; it is one skipped tick now.
+
+    Nothing may be spent on the skipped tick: the recorder neither commands the
+    arms nor writes a frame when a state is stale, so an action consumed here
+    would be an action that never reaches the arm, and a chunk requested here
+    would be planned from a state already too old to plan from.
+    """
+    client = _Client()
+    source = _source(client, chunk_size=3)
+    fresh = {"left": _state("left"), "right": _state("right")}
+    gap = {"left": _aged("left", 0.264), "right": _state("right")}
+    try:
+        assert source.act(gap) == {}
+        assert client.calls == 0, "no inference was requested from a stale state"
+
+        first = source.act(fresh)
+        assert client.calls == 1
+        # The gap consumed nothing: the first action after it is the chunk's first.
+        again = _source(_Client(), chunk_size=3)
+        try:
+            assert first == again.act(fresh)
+        finally:
+            again.close()
+
+        assert source.act(gap) == {}
+        source.act(fresh)
+        source.act(fresh)
+        assert client.calls == 1, "a gap mid-chunk does not skip or re-request an action"
+    finally:
+        source.close()
+
+
+def test_an_arm_silent_past_the_limit_is_still_a_fault() -> None:
+    """Riding out jitter must not become riding out a dead node."""
+    source = _source(max_stale_s=1.0)
+    try:
+        assert source.act({"left": _aged("left", 0.9), "right": _state("right")}) == {}
+        try:
+            source.act({"left": _aged("left", 1.05), "right": _state("right")})
+        except inference.InferenceError as err:
+            assert "left state is" in str(err) and "silent past the 1s limit" in str(err)
+        else:  # pragma: no cover - the assertion is the point
+            raise AssertionError("an arm silent for over a second must stop the run")
+    finally:
+        source.close()
+
+
+def test_a_missing_state_is_timed_from_when_it_went_missing() -> None:
+    """A state that never arrived has no age of its own to judge it by."""
+    source = _source(max_stale_s=0.3)
+    try:
+        assert source.act({"left": None, "right": _state("right")}) == {}
+        time.sleep(0.32)
+        try:
+            source.act({"left": None, "right": _state("right")})
+        except inference.InferenceError as err:
+            assert "left state is missing" in str(err)
+        else:  # pragma: no cover
+            raise AssertionError("an arm that never publishes must stop the run")
+    finally:
+        source.close()
+
+
+def test_a_fresh_tick_resets_the_silence_clock() -> None:
+    """Separate short gaps are jitter; only one unbroken silence is a fault."""
+    source = _source(max_stale_s=0.3)
+    try:
+        for _ in range(3):
+            assert source.act({"left": None, "right": _state("right")}) == {}
+            time.sleep(0.2)
+            # Built per tick: a state is only fresh at the moment it arrives.
+            source.act({"left": _state("left"), "right": _state("right")})
+    finally:
+        source.close()
+
+
+def test_a_gap_that_opens_inside_the_observation_read_is_ridden_out() -> None:
+    """The freshness check and the camera/state read are two moments, not one.
+
+    ``build_observation`` reads the arms again and raises ``StaleStateError``
+    -- which is not an ``InferenceError`` but stops ``hitl`` all the same -- if
+    the gap begins between the two.
+    """
+    client = _Client()
+    source = InferenceRolloutSource(
+        arms={
+            "left": SimpleNamespace(latest_state=_aged("left", 0.3)),
+            "right": SimpleNamespace(latest_state=_state("right")),
+        },
+        readers={"top": _Reader(), "left_wrist": _Reader(), "right_wrist": _Reader()},
+        client=client,  # type: ignore[arg-type]
+        instruction="fold the towel",
+        episode_seconds=10.0,
+        speed=1.0,
+        prefetch=False,
+    )
+    try:
+        assert source.act({"left": _state("left"), "right": _state("right")}) == {}
+        assert client.calls == 0
+    finally:
+        source.close()
+
+
+def test_max_stale_s_must_outlast_the_freshness_limit() -> None:
+    import pytest
+
+    from openpi_control.exceptions import ConfigurationError
+
+    with pytest.raises(ConfigurationError, match="max_stale_s"):
+        _source(max_stale_s=0.25)

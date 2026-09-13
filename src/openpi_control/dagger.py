@@ -211,7 +211,10 @@ class DaggerSource(TeleopSource):
         else:
             targets = self._policy.act(states)
             self._policy_frames += 1
-        self._last_targets = targets
+        # Not overwritten by a skipped tick: an empty map would erase the
+        # gripper a handoff on the next tick has to inherit.
+        if targets:
+            self._last_targets = targets
         return TeleopStep(
             targets=targets,
             event=event,

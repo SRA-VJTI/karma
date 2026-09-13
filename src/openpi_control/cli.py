@@ -54,6 +54,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -70,7 +71,7 @@ from .config import (
     connection_for_interface,
     resolve_model_assets,
 )
-from .exceptions import ConfigurationError, PiControlError
+from .exceptions import ConfigurationError, PiControlError, StaleStateError
 from .inference import (
     DEFAULT_CHUNK_SPEED,
     DEFAULT_MAX_EFFECTOR_STEP,
@@ -97,6 +98,14 @@ from .inference import (
 )
 from .inference_record import InferenceRolloutSource
 from .rigs import Rig, RigArm, resolve_rig, rig_names
+from .safety import (
+    MAX_STATE_AGE_S,
+    StateGuard,
+    joint_limits,
+    report_gripper_start,
+    validate_motion_parameters,
+    warn_stalled_grippers,
+)
 from .servos import SERVO_ZERO_DRIVERS, buses
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -1063,18 +1072,6 @@ def open_inference_cameras(
     return readers
 
 
-def _inference_states(live_arms: list[LiveArm], *, max_age_s: float) -> dict[str, object]:
-    """Return the latest states after the observation builder has checked them."""
-    states: dict[str, object] = {}
-    for entry in live_arms:
-        state = entry.arm.latest_state
-        if state is None or not state.is_fresh(max_age_s):
-            age = "missing" if state is None else f"{state.age_s * 1e3:.0f} ms old"
-            raise InferenceError(f"{entry.name} state is not fresh ({age})")
-        states[entry.name] = state
-    return states
-
-
 def run_infer(
     rig: Rig,
     *,
@@ -1125,6 +1122,15 @@ def run_infer(
     boundary. Neither changes what the policy is asked for; both change how
     hard the answer is driven, so A/B them one at a time.
     """
+    validate_motion_parameters(
+        control_rate=control_rate_hz,
+        speed=speed,
+        max_step_rad=max_step_rad,
+        max_effector_step=max_effector_step,
+        request_timeout_s=request_timeout_s,
+    )
+    if not np.isfinite(prefetch_margin_s) or prefetch_margin_s < 0:
+        raise ConfigurationError("--prefetch-margin-s must be finite and nonnegative")
     if tuple(rig.names) != ("left", "right"):
         raise ConfigurationError(
             "MolmoAct2 bimanual inference requires the packaged left/right YAM rig"
@@ -1169,17 +1175,7 @@ def run_infer(
         camera_readers = open_inference_cameras(capture_rig, overrides=camera_overrides)
         session, live_arms = power_up(rig, float_mode=False, backend_factory=backend_factory)
         arm_map = {entry.name: entry.arm for entry in live_arms}
-        limits = {
-            name: (
-                np.array([spec.lower for spec in scene[name].joint_specs], dtype=np.float64)
-                if scene is not None
-                else np.full(6, -np.inf),
-                np.array([spec.upper for spec in scene[name].joint_specs], dtype=np.float64)
-                if scene is not None
-                else np.full(6, np.inf),
-            )
-            for name in ("left", "right")
-        }
+        limits = joint_limits(rig)
         executor: BoundedChunkExecutor | ReachingChunkExecutor = (
             ReachingChunkExecutor(
                 max_joint_step_rad=max_step_rad,
@@ -1223,13 +1219,8 @@ def run_infer(
         # into link_6's mesh, so the render shows the same jaws whatever the
         # gripper is doing. A reading that disagrees with the hardware in front
         # of you means the gripper servo is zeroed at the wrong stop.
-        opening = _inference_states(live_arms, max_age_s=0.25)
-        readings = ", ".join(
-            f"{name} {state.effector.position:.3f}"  # type: ignore[union-attr]
-            for name, state in sorted(opening.items())
-            if state.effector is not None  # type: ignore[union-attr]
-        )
-        print(f"  gripper  measured now: {readings} (1.0 = open) — check the jaws agree")
+        opening = settle_arm_states(live_arms)
+        report_gripper_start(opening)
         runtime = [
             label
             for label, enabled in (
@@ -1248,12 +1239,24 @@ def run_infer(
         print("ctrl-c to park at home_pos and power down")
 
         period = 1.0 / control_rate_hz
+        state_guard = StateGuard(arm_map)
+
+        def fresh_states():
+            while not stop.is_set():
+                states = state_guard.check(
+                    {name: arm.latest_state for name, arm in arm_map.items()}
+                )
+                if states is not None:
+                    return states
+                stop.wait(min(period, 0.02))
+            raise KeyboardInterrupt
 
         def walk(rows: list[dict[str, PositionCommand]]) -> None:
             """Command an interpolated ramp, one row per ``SUB_STEP_PERIOD_S``."""
             for row in rows:
                 if stop.is_set():
                     return
+                fresh_states()
                 for name, command in row.items():
                     arm_map[name].command(command)
                 stop.wait(SUB_STEP_PERIOD_S)
@@ -1283,14 +1286,18 @@ def run_infer(
                 return request(observation)
 
         if reset_start_pose:
-            states = _inference_states(live_arms, max_age_s=0.25)
+            states = fresh_states()
             plan = start_pose_plan(states)  # type: ignore[arg-type]
             print(f"  reset    ramping to the training start pose ({len(plan)} steps)")
             walk(plan)
 
         while not stop.is_set():
-            observation = build_observation(arm_map, camera_readers)
-            states = _inference_states(live_arms, max_age_s=0.25)
+            states = fresh_states()
+            try:
+                observation = build_observation(arm_map, camera_readers)
+            except StaleStateError:
+                stop.wait(min(period, 0.02))
+                continue
             if scene is not None:
                 for name, state in states.items():
                     scene.update(name, state.joints.position_rad)  # type: ignore[union-attr]
@@ -1337,22 +1344,7 @@ def run_infer(
             # so the denominator has to be what the chunk was executed as.
             last_chunk_len = len(plan)
             lag = 0.0
-            # Said once per arm and then not repeated: a gripper that is inert
-            # stays inert, and a warning on every chunk would bury the run.
-            for name in gripper.stalled():
-                if name in stalled_grippers:
-                    continue
-                stalled_grippers.add(name)
-                print(
-                    f"  gripper  {name} is NOT TRACKING: commanded across "
-                    f"{gripper.command_travel:.2f} of its range and the measured "
-                    f"position has not moved once. Check the startup calibration "
-                    f"line in the node log — a stroke it could not measure means "
-                    f"the jaws were blocked when it probed, and the run is using "
-                    f"the configured range instead.",
-                    file=sys.stderr,
-                    flush=True,
-                )
+            warn_stalled_grippers(gripper, stalled_grippers)
             if gripper_panel is not None:
                 gripper_panel.update(
                     gripper.commanded, gripper.measured, stalled=sorted(stalled_grippers)
@@ -1362,7 +1354,7 @@ def run_infer(
                 if stop.is_set():
                     break
                 tick_start = time.monotonic()
-                states = _inference_states(live_arms, max_age_s=0.25)
+                states = fresh_states()
                 if isinstance(executor, ReachingChunkExecutor):
                     # The reference runtime: walk to the action so the arm
                     # arrives at it, which paces itself and usually outruns the
@@ -1392,7 +1384,12 @@ def run_infer(
                     # takes, so the next chunk lands just as this one runs out.
                     queued_s = (len(plan) - index - 1) * period
                     if queued_s <= prefetcher.latency_s + prefetch_margin_s:
-                        prefetcher.submit(build_observation(arm_map, camera_readers), instruction)
+                        try:
+                            prefetcher.submit(
+                                build_observation(arm_map, camera_readers), instruction
+                            )
+                        except StaleStateError:
+                            pass  # Retry on the next fresh tick.
                 remaining = period - (time.monotonic() - tick_start)
                 if remaining > 0:
                     stop.wait(remaining)
@@ -1403,16 +1400,16 @@ def run_infer(
         runtime_error = err
         print(f"inference stopped: {type(err).__name__}: {err}", file=sys.stderr)
     finally:
-        if prefetcher is not None:
-            prefetcher.close()
-        client.close()
-        if scene is not None:
-            scene.clear_chunk()
-        cameras_mod.close_readers(camera_readers)
-        if scene is not None:
-            scene.server.stop()
-        if session is not None:
-            failures = power_down(session, live_arms, park=park)
+        with ExitStack() as cleanup:
+            if scene is not None:
+                cleanup.callback(scene.server.stop)
+                cleanup.callback(scene.clear_chunk)
+            cleanup.callback(cameras_mod.close_readers, camera_readers)
+            cleanup.callback(client.close)
+            if prefetcher is not None:
+                cleanup.callback(prefetcher.close)
+            if session is not None:
+                failures = power_down(session, live_arms, park=park)
     if runtime_error is not None:
         return 1
     return 1 if failures else 0
@@ -1462,6 +1459,17 @@ def run_rollout(
     """
     from . import record as record_mod
 
+    validate_motion_parameters(
+        fps=fps,
+        episode_seconds=episode_seconds,
+        episodes=episodes,
+        speed=speed,
+        max_step_rad=max_step_rad,
+        max_effector_step=max_effector_step,
+        request_timeout_s=request_timeout_s,
+    )
+    if not np.isfinite(prefetch_margin_s) or prefetch_margin_s < 0:
+        raise ConfigurationError("--prefetch-margin-s must be finite and nonnegative")
     if tuple(rig.names) != ("left", "right"):
         raise ConfigurationError("policy rollouts require the packaged bimanual left/right YAM rig")
     if episodes <= 0:
@@ -1549,18 +1557,11 @@ def run_rollout(
                 session, live_arms = power_up(
                     rig, float_mode=False, backend_factory=backend_factory
                 )
+                report_gripper_start(settle_arm_states(live_arms))
+                gripper = GripperWatch()
+                stalled_grippers: set[str] = set()
                 arm_map = {entry.name: entry.arm for entry in live_arms}
-                limits = {
-                    name: (
-                        np.array([spec.lower for spec in scene[name].joint_specs], dtype=np.float64)
-                        if scene is not None
-                        else np.full(6, -np.inf),
-                        np.array([spec.upper for spec in scene[name].joint_specs], dtype=np.float64)
-                        if scene is not None
-                        else np.full(6, np.inf),
-                    )
-                    for name in ("left", "right")
-                }
+                limits = joint_limits(rig)
 
                 def on_chunk(actions: np.ndarray) -> None:
                     if scene is not None:
@@ -1572,7 +1573,12 @@ def run_rollout(
                     states: Mapping[str, object],
                     commands: Mapping[str, PositionCommand],
                     consumed: int,
+                    *,
+                    gripper: GripperWatch = gripper,
+                    stalled_grippers: set[str] = stalled_grippers,
                 ) -> None:
+                    gripper.observe(commands, states)
+                    warn_stalled_grippers(gripper, stalled_grippers)
                     if scene is not None:
                         for name, state in states.items():
                             scene.update(name, state.joints.position_rad)  # type: ignore[union-attr]
@@ -1607,14 +1613,18 @@ def run_rollout(
                     num_episodes=0,
                     finalize=False,
                     save_on_interrupt=True,
+                    max_state_age_s=MAX_STATE_AGE_S,
+                    command_limits=limits,
                 )
             finally:
-                if source is not None:
-                    source.close()
-                if scene is not None:
-                    scene.clear_chunk()
-                if session is not None:
-                    park_failures = power_down(session, live_arms, park=True)
+                try:
+                    if source is not None:
+                        source.close()
+                finally:
+                    if session is not None:
+                        park_failures = power_down(session, live_arms, park=True)
+                    if scene is not None:
+                        scene.clear_chunk()
 
             if park_failures:
                 print(
@@ -1656,12 +1666,13 @@ def run_rollout(
         print(f"rollout stopped: {type(err).__name__}: {err}", file=sys.stderr)
         status = 1
     finally:
-        if sink is not None:
-            sink.finalize()  # type: ignore[attr-defined]
-        client.close()
-        cameras_mod.close_readers(cameras)
-        if scene is not None:
-            scene.server.stop()
+        with ExitStack() as cleanup:
+            if scene is not None:
+                cleanup.callback(scene.server.stop)
+            cleanup.callback(cameras_mod.close_readers, cameras)
+            cleanup.callback(client.close)
+            if sink is not None:
+                sink.finalize()  # type: ignore[attr-defined]
     return status
 
 
@@ -1683,8 +1694,23 @@ def _rollout_yes_no(input_fn: Callable[[str], str], message: str) -> bool:
         print("Please enter y or n.", file=sys.stderr)
 
 
+def _hitl_review(input_fn: Callable[[str], str], episode: int) -> str:
+    while True:
+        answer = (
+            input_fn(f"Episode {episode}: [y] keep success / [n] keep failure / [d] discard: ")
+            .strip()
+            .lower()
+        )
+        answer = {"yes": "y", "no": "n", "discard": "d"}.get(answer, answer)
+        if answer in {"y", "n", "d"}:
+            return answer
+        print("Please enter y, n, or d.", file=sys.stderr)
+
+
 def _write_rollout_manifest(path: Path, manifest: Mapping[str, object]) -> None:
-    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
 
 
 # --------------------------------------------------------------------------- #
@@ -1755,6 +1781,17 @@ def run_hitl(
     from .dagger import END_EPISODE_HOLD_S, INTERVENTION_FEATURE, DaggerSource
     from .teleop_vr import QuestTeleopSource
 
+    validate_motion_parameters(
+        fps=fps,
+        episode_seconds=episode_seconds,
+        episodes=episodes,
+        speed=speed,
+        max_step_rad=max_step_rad,
+        max_effector_step=max_effector_step,
+        request_timeout_s=request_timeout_s,
+    )
+    if not np.isfinite(prefetch_margin_s) or prefetch_margin_s < 0:
+        raise ConfigurationError("--prefetch-margin-s must be finite and nonnegative")
     if tuple(rig.names) != ("left", "right"):
         raise ConfigurationError(
             "DAgger recording requires the packaged bimanual left/right YAM rig"
@@ -1869,7 +1906,7 @@ def run_hitl(
                 )
                 print(
                     f"    {DaggerSource.GIVE + ' (hold)':<14} end this attempt now — save, park,"
-                    f" then the y/n prompt ({END_EPISODE_HOLD_S:g}s)"
+                    f" then review: y/n/d ({END_EPISODE_HOLD_S:g}s)"
                 )
                 print("    ctrl-c         the same, from the keyboard")
                 print()
@@ -1909,12 +1946,13 @@ def run_hitl(
         print(f"hitl stopped: {type(err).__name__}: {err}", file=sys.stderr)
         status = 1
     finally:
-        if sink is not None:
-            sink.finalize()  # type: ignore[attr-defined]
-        client.close()
-        cameras_mod.close_readers(cameras)
-        if scene is not None:
-            scene.server.stop()
+        with ExitStack() as cleanup:
+            if scene is not None:
+                cleanup.callback(scene.server.stop)
+            cleanup.callback(cameras_mod.close_readers, cameras)
+            cleanup.callback(client.close)
+            if sink is not None:
+                sink.finalize()  # type: ignore[attr-defined]
 
     if push_to_hub and status == 0 and sink is not None:
         print(f"pushing {repo_id} to the Hub ({'private' if private else 'public'}) ...")
@@ -1964,8 +2002,12 @@ def _hitl_episodes(
     from .dagger import DaggerSource, InterventionStats
 
     status = 0
-    for episode_index in range(1, episodes + 1):
-        if episode_index > 1 and wait_between_episodes:
+    initial_saved = sink.num_episodes  # type: ignore[attr-defined]
+    attempt = 0
+    while sink.num_episodes - initial_saved < episodes:  # type: ignore[attr-defined]
+        attempt += 1
+        episode_index = sink.num_episodes - initial_saved + 1  # type: ignore[attr-defined]
+        if attempt > 1 and wait_between_episodes:
             input_fn("Reset the scene to its starting pose, then press Enter to continue: ")
         prompt = _rollout_prompt(input_fn, episode_index, episodes)
         print(f"\nEpisode {episode_index}/{episodes}: {prompt!r}")
@@ -1974,41 +2016,19 @@ def _hitl_episodes(
         live_arms: list[LiveArm] = []
         source: object | None = None
         saved_before = sink.num_episodes  # type: ignore[attr-defined]
+        review = record_mod.ReviewSink(sink)
         episode_result = None
         stats = InterventionStats()
         park_failures = 0
         gripper = GripperWatch()
+        state_guard = StateGuard(rig.names)
         stalled_grippers: set[str] = set()
         try:
             session, live_arms = power_up(rig, float_mode=False, backend_factory=backend_factory)
-            # Before anything reads a state: the policy source treats a stale
-            # one as fatal, and the node has only just started publishing.
             opening = settle_arm_states(live_arms)
-            # Said before anything moves, exactly as ``infer`` does it. The
-            # Viser render cannot show this -- the packaged YAM URDF bakes the
-            # gripper into link_6 -- so a jaw that disagrees with the number
-            # here is a gripper servo zeroed at the wrong stop, and this is
-            # the only place an operator finds that out before it grips.
-            readings = ", ".join(
-                f"{name} {state.effector.position:.3f}"  # type: ignore[union-attr]
-                for name, state in sorted(opening.items())
-                if state.effector is not None  # type: ignore[union-attr]
-            )
-            if readings:
-                print(f"  gripper  measured now: {readings} (1.0 = open) —"
-                      " check the jaws agree")
+            report_gripper_start(opening)
             arm_map = {entry.name: entry.arm for entry in live_arms}
-            limits = {
-                name: (
-                    np.array([spec.lower for spec in scene[name].joint_specs], dtype=np.float64)
-                    if scene is not None
-                    else np.full(6, -np.inf),
-                    np.array([spec.upper for spec in scene[name].joint_specs], dtype=np.float64)
-                    if scene is not None
-                    else np.full(6, np.inf),
-                )
-                for name in ("left", "right")
-            }
+            limits = joint_limits(rig)
 
             def on_chunk(actions: np.ndarray) -> None:
                 if scene is not None:
@@ -2063,7 +2083,9 @@ def _hitl_episodes(
                 driver: DaggerSource = source,
                 gripper: GripperWatch = gripper,
                 stalled: set[str] = stalled_grippers,
+                guard: StateGuard = state_guard,
             ) -> None:
+                guard.check(states)
                 if scene is not None:
                     for name, state in states.items():
                         if state is not None:
@@ -2079,46 +2101,47 @@ def _hitl_episodes(
                     driver.commanded_effector,
                     states,  # type: ignore[arg-type]
                 )
-                for name in gripper.stalled():
-                    if name in stalled:
-                        continue
-                    # Once per arm: a gripper that is inert stays inert, and a
-                    # line per tick would bury the run.
-                    stalled.add(name)
-                    print(
-                        f"  gripper  {name} is NOT TRACKING: commanded across "
-                        f"{gripper.command_travel:.2f} of its range and the measured "
-                        f"position has not moved once. Check the startup calibration "
-                        f"line in the node log — a stroke it could not measure means "
-                        f"the jaws were blocked when it probed, and the run is using "
-                        f"the configured range instead.",
-                        file=sys.stderr,
-                        flush=True,
-                    )
+                warn_stalled_grippers(gripper, stalled)
 
             episode_result = record_mod.record_session(
                 arms=arm_map,
                 source=source,  # type: ignore[arg-type]
-                sink=sink,  # type: ignore[arg-type]
+                sink=review,
                 task=prompt,
                 fps=fps,
                 cameras=cameras,
                 num_episodes=0,
                 finalize=False,
                 save_on_interrupt=True,
+                max_state_age_s=MAX_STATE_AGE_S,
+                command_limits=limits,
+                report=lambda message: print(
+                    "  "
+                    + message.replace("SAVED", "CAPTURED — awaiting review").replace(
+                        "saved partially", "captured partially; awaiting review"
+                    ),
+                    flush=True,
+                ),
                 # Unconditional: it carries the gripper-stall watch, which is a
                 # safety check and not a view, so --no-viz must not switch it off.
                 on_tick=on_record_tick,
             )
         finally:
-            if source is not None:
-                # Read before closing: the counts are this attempt's label.
-                stats = source.stats  # type: ignore[attr-defined]
-                source.close()  # type: ignore[attr-defined]
-            if scene is not None:
-                scene.clear_chunk()
-            if session is not None:
-                park_failures = power_down(session, live_arms, park=True)
+            try:
+                if source is not None:
+                    stats = source.stats  # type: ignore[attr-defined]
+                    source.close()  # type: ignore[attr-defined]
+            finally:
+                try:
+                    if session is not None:
+                        park_failures = power_down(session, live_arms, park=True)
+                finally:
+                    # Preserve a completed take if teardown raises. Parking
+                    # must still run even if closing the source fails.
+                    if sys.exc_info()[0] is not None:
+                        review.commit()
+                if scene is not None:
+                    scene.clear_chunk()
 
         if park_failures:
             print(
@@ -2126,28 +2149,45 @@ def _hitl_episodes(
                 file=sys.stderr,
             )
             status = 1
-            break
 
-        saved = sink.num_episodes > saved_before  # type: ignore[attr-defined]
+        saved = review.pending or sink.num_episodes > saved_before  # type: ignore[attr-defined]
         aborted = episode_result is not None and episode_result.ended_by == "interrupted"
         if aborted:
             if saved:
-                print("  episode interrupted; partial frames were saved")
+                print("  episode interrupted; partial frames are awaiting review")
             else:
                 print("  episode interrupted before a frame was captured")
         print(f"  handoff  {stats.summary()}")  # type: ignore[attr-defined]
-        success = _rollout_yes_no(input_fn, f"Episode {episode_index} successful? [y/n]: ")
+        decision = "unlabeled"
+        review_interrupted = False
+        try:
+            if review.pending and not park_failures:
+                decision = _hitl_review(input_fn, episode_index)
+        except (KeyboardInterrupt, EOFError):
+            review_interrupted = True
+            print("\n  review interrupted; keeping the episode without an outcome label")
+        finally:
+            if decision == "d":
+                review.discard_episode()
+                saved = False
+                print("  episode discarded")
+            else:
+                review.commit()
+                if saved:
+                    print(f"  episode saved (dataset index {saved_before}; {decision})")
+        success = {"y": True, "n": False}.get(decision)
         if not saved:
             print("  no LeRobot episode was written for this attempt")
         entries = manifest["episodes"]
         assert isinstance(entries, list)
         entries.append(
             {
-                "attempt": episode_index,
+                "attempt": attempt,
                 "episode_index": saved_before if saved else None,
                 "prompt": prompt,
                 "success": success,
-                "label": "y" if success else "n",
+                "label": decision,
+                "discarded": decision == "d",
                 "saved": saved,
                 "aborted": aborted,
                 **stats.as_dict(),  # type: ignore[attr-defined]
@@ -2155,6 +2195,10 @@ def _hitl_episodes(
         )
         if manifest_path is not None:
             _write_rollout_manifest(manifest_path, manifest)
+        if review_interrupted:
+            raise KeyboardInterrupt
+        if park_failures:
+            break
     return status
 
 
@@ -3236,7 +3280,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     hitl.add_argument("--root", type=Path, default=None, help="local LeRobot dataset directory")
     hitl.add_argument(
-        "--episodes", type=int, default=3, help="number of attempts (default: 3)"
+        "--episodes",
+        type=int,
+        default=3,
+        help="number of saved episodes; discarded attempts are retried (default: 3)",
     )
     hitl.add_argument(
         "--episode-seconds",
@@ -3346,9 +3393,7 @@ def main(argv: list[str] | None = None) -> int:
     hitl.add_argument(
         "--mesh-dir", type=Path, default=None, help="directory holding the URDF meshes"
     )
-    hitl.add_argument(
-        "--push-to-hub", action="store_true", help="upload after the arms are down"
-    )
+    hitl.add_argument("--push-to-hub", action="store_true", help="upload after the arms are down")
     hitl.add_argument("--private", action="store_true", help="with --push-to-hub, keep it private")
     hitl.add_argument(
         "--skip-preflight",
@@ -3808,21 +3853,8 @@ def _command_teleop(args: argparse.Namespace, log_path: Path) -> int:
             f"{rig_arm.effector_model or 'no effector':<12} {rig_arm.role}"
         )
 
-    if not args.skip_preflight:
-        failures, reports = preflight_rig(rig)
-        for name, results in reports:
-            problems = [result for result in results if result.status != _OK]
-            summary = "all checks pass" if not problems else f"{len(problems)} to look at"
-            print(f"\npreflight {name}: {summary}")
-            for result in problems:
-                print(result.render())
-        if failures:
-            print(
-                f"\n{failures} failed check(s); nothing was energized. "
-                "Fix them, or re-run with --skip-preflight.",
-                file=sys.stderr,
-            )
-            return 1
+    if not args.skip_preflight and not _runtime_preflight(rig):
+        return 1
 
     from .quest import QuestAdbTunnel, QuestRelay
     from .teleop_runtime import run_teleop
@@ -3971,6 +4003,28 @@ def _command_live(args: argparse.Namespace, log_path: Path) -> int:
     return status
 
 
+def _runtime_preflight(rig: Rig, *, camera_overrides=None) -> bool:
+    failures, reports = preflight_rig(rig)
+    if camera_overrides is not None:
+        checks = run_camera_checks(rig, overrides=camera_overrides, required=True)
+        checks += check_camera_modes(rig)
+        failures += sum(check.status == _FAIL for check in checks)
+        reports = [*reports, ("cameras", checks)]
+    for name, results in reports:
+        problems = [result for result in results if result.status != _OK]
+        summary = "all checks pass" if not problems else f"{len(problems)} to look at"
+        print(f"\npreflight {name}: {summary}")
+        for result in problems:
+            print(result.render())
+    if failures:
+        print(
+            f"\n{failures} failed check(s); nothing was energized. "
+            "Fix them, or re-run with --skip-preflight.",
+            file=sys.stderr,
+        )
+    return failures == 0
+
+
 def _command_infer(args: argparse.Namespace, log_path: Path) -> int:
     """Preflight and run the hardware-coupled MolmoAct2 loop."""
     rig = resolve_rig(args.rig).with_interfaces(_parse_interface_overrides(args.interface))
@@ -3979,21 +4033,11 @@ def _command_infer(args: argparse.Namespace, log_path: Path) -> int:
             "infer currently supports only the packaged bimanual left/right YAM rig"
         )
 
-    if not args.skip_preflight:
-        failures, reports = preflight_rig(rig)
-        for name, results in reports:
-            problems = [result for result in results if result.status != _OK]
-            summary = "all checks pass" if not problems else f"{len(problems)} to look at"
-            print(f"\npreflight {name}: {summary}")
-            for result in problems:
-                print(result.render())
-        if failures:
-            print(
-                f"\n{failures} failed check(s); nothing was energized. "
-                "Fix them, or re-run with --skip-preflight.",
-                file=sys.stderr,
-            )
-            return 1
+    overrides = cameras_mod.parse_camera_overrides(args.camera)
+    if not args.skip_preflight and not _runtime_preflight(
+        rig.with_camera_capture(pixel_format="rgb8"), camera_overrides=overrides
+    ):
+        return 1
 
     status = run_infer(
         rig,
@@ -4014,7 +4058,7 @@ def _command_infer(args: argparse.Namespace, log_path: Path) -> int:
         reset_start_pose=args.reset_start_pose,
         park=args.park,
         visualize=args.visualize,
-        camera_overrides=cameras_mod.parse_camera_overrides(args.camera),
+        camera_overrides=overrides,
         port=args.port,
         mesh_dir=args.mesh_dir,
     )
@@ -4030,21 +4074,11 @@ def _command_rollout(args: argparse.Namespace, log_path: Path) -> int:
             "rollout currently supports only the packaged bimanual left/right YAM rig"
         )
 
-    if not args.skip_preflight:
-        failures, reports = preflight_rig(rig)
-        for name, results in reports:
-            problems = [result for result in results if result.status != _OK]
-            summary = "all checks pass" if not problems else f"{len(problems)} to look at"
-            print(f"\npreflight {name}: {summary}")
-            for result in problems:
-                print(result.render())
-        if failures:
-            print(
-                f"\n{failures} failed check(s); nothing was energized. "
-                "Fix them, or re-run with --skip-preflight.",
-                file=sys.stderr,
-            )
-            return 1
+    overrides = cameras_mod.parse_camera_overrides(args.camera)
+    if not args.skip_preflight and not _runtime_preflight(
+        rig.with_camera_capture(fps=args.fps, pixel_format="rgb8"), camera_overrides=overrides
+    ):
+        return 1
 
     status = run_rollout(
         rig,
@@ -4066,7 +4100,7 @@ def _command_rollout(args: argparse.Namespace, log_path: Path) -> int:
         prefetch=args.prefetch,
         prefetch_margin_s=args.prefetch_margin_s,
         visualize=args.visualize,
-        camera_overrides=cameras_mod.parse_camera_overrides(args.camera),
+        camera_overrides=overrides,
         port=args.port,
         mesh_dir=args.mesh_dir,
         wait_between_episodes=args.wait_between_episodes,
@@ -4094,32 +4128,10 @@ def _command_hitl(args: argparse.Namespace, log_path: Path) -> int:
             )
 
     overrides = cameras_mod.parse_camera_overrides(args.camera)
-    if not args.skip_preflight:
-        failures, reports = preflight_rig(rig)
-        # Cameras are not optional here: the policy is handed all three views
-        # on every request, so a missing one stops the run rather than
-        # narrowing it.
-        camera_results = run_camera_checks(rig, overrides=overrides, required=True)
-        camera_results += check_camera_modes(rig)
-        failures += sum(1 for result in camera_results if result.status == _FAIL)
-        for name, results in reports:
-            problems = [result for result in results if result.status != _OK]
-            summary = "all checks pass" if not problems else f"{len(problems)} to look at"
-            print(f"\npreflight {name}: {summary}")
-            for result in problems:
-                print(result.render())
-        camera_problems = [result for result in camera_results if result.status != _OK]
-        if camera_problems:
-            print("\npreflight cameras:")
-            for result in camera_problems:
-                print(result.render())
-        if failures:
-            print(
-                f"\n{failures} failed check(s); nothing was energized. "
-                "Fix them, or re-run with --skip-preflight.",
-                file=sys.stderr,
-            )
-            return 1
+    if not args.skip_preflight and not _runtime_preflight(
+        rig.with_camera_capture(fps=args.fps, pixel_format="rgb8"), camera_overrides=overrides
+    ):
+        return 1
 
     status = run_hitl(
         rig,

@@ -16,7 +16,7 @@ from typing import Any
 
 import numpy as np
 
-from .exceptions import ConfigurationError
+from .exceptions import ConfigurationError, StaleStateError
 from .inference import (
     DEFAULT_CHUNK_SPEED,
     DEFAULT_MAX_EFFECTOR_STEP,
@@ -32,7 +32,10 @@ from .inference import (
     time_scale,
 )
 from .record import ArmTarget, EpisodeEvent, TeleopSource, TeleopStep
+from .safety import MAX_STALE_S, MAX_STATE_AGE_S, StateGuard
 from .types import ArmState, PositionCommand
+
+DEFAULT_MAX_STALE_S = MAX_STALE_S
 
 
 class InferenceRolloutSource(TeleopSource):
@@ -59,12 +62,11 @@ class InferenceRolloutSource(TeleopSource):
         limits: Mapping[str, tuple[np.ndarray, np.ndarray]] | None = None,
         prefetch: bool = True,
         prefetch_margin_s: float = DEFAULT_PREFETCH_MARGIN_S,
+        max_stale_s: float = DEFAULT_MAX_STALE_S,
         carry_targets: bool = False,
         stop: threading.Event | None = None,
         on_chunk: Callable[[np.ndarray], None] | None = None,
-        on_tick: Callable[
-            [Mapping[str, ArmState], Mapping[str, PositionCommand], int], None
-        ]
+        on_tick: Callable[[Mapping[str, ArmState], Mapping[str, PositionCommand], int], None]
         | None = None,
     ) -> None:
         if not instruction.strip():
@@ -79,6 +81,10 @@ class InferenceRolloutSource(TeleopSource):
             raise ConfigurationError("inference chunk size must be positive")
         if prefetch_margin_s < 0:
             raise ConfigurationError("inference prefetch margin must not be negative")
+        if max_stale_s <= MAX_STATE_AGE_S:
+            raise ConfigurationError(
+                f"max_stale_s must exceed the {MAX_STATE_AGE_S:g}s freshness limit"
+            )
         self._arms = dict(arms)
         self._readers = dict(readers)
         self._client = client
@@ -89,6 +95,9 @@ class InferenceRolloutSource(TeleopSource):
         self._chunk_size = chunk_size
         self._limits = limits
         self._prefetch_margin_s = float(prefetch_margin_s)
+        self._max_stale_s = float(max_stale_s)
+        # When the current run of stale ticks began; None while states are fresh.
+        self._state_guard = StateGuard(self._arms, max_stale_s=max_stale_s)
         self._stop = stop if stop is not None else threading.Event()
         self._on_chunk = on_chunk
         self._on_tick = on_tick
@@ -140,8 +149,18 @@ class InferenceRolloutSource(TeleopSource):
         tick whose commands would be thrown away.
         """
         fresh_states = self._fresh_states(states)
+        if fresh_states is None:
+            # Nothing is planned, stepped, or requested on this tick. The
+            # recorder sees the same stale state and neither commands the arms
+            # nor writes the frame, so advancing the plan here would spend an
+            # action nobody ever sends.
+            return {}
         if self._plan_index >= len(self._plan):
-            observation = build_observation(self._arms, self._readers)
+            try:
+                observation = build_observation(self._arms, self._readers)
+            except StaleStateError:
+                # The same gap, starting between the check above and this read.
+                return {}
             self._executor.reset(fresh_states)
             actions = self._request(observation)
             if self._chunk_size is not None:
@@ -206,20 +225,8 @@ class InferenceRolloutSource(TeleopSource):
         if self._prefetcher is not None:
             self._prefetcher.close()
 
-    def _fresh_states(
-        self, states: Mapping[str, ArmState | None]
-    ) -> dict[str, ArmState]:
-        fresh: dict[str, ArmState] = {}
-        for name in self._arms:
-            state = states.get(name)
-            if state is None:
-                raise InferenceError(f"{name} state is missing during inference recording")
-            if not state.is_fresh(0.25):
-                raise InferenceError(
-                    f"{name} state is {state.age_s * 1e3:.0f} ms old during inference recording"
-                )
-            fresh[name] = state
-        return fresh
+    def _fresh_states(self, states: Mapping[str, ArmState | None]) -> dict[str, ArmState] | None:
+        return self._state_guard.check(states)
 
     def _request(self, observation: Any) -> np.ndarray:
         try:
@@ -245,5 +252,8 @@ class InferenceRolloutSource(TeleopSource):
         queued_s = (len(self._plan) - self._plan_index) * self._period
         if queued_s > self._prefetcher.latency_s + self._prefetch_margin_s:
             return
-        observation = build_observation(self._arms, self._readers)
+        try:
+            observation = build_observation(self._arms, self._readers)
+        except StaleStateError:
+            return  # retried next tick; a prefetch is an optimisation, not a step
         self._prefetcher.submit(observation, self._instruction)

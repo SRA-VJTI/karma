@@ -619,3 +619,24 @@ def test_commanded_effector_skips_an_arm_with_no_gripper() -> None:
     policy.effector = None
     source.poll(states())
     assert source.commanded_effector == {}
+
+
+def test_a_skipped_policy_tick_does_not_erase_the_commanded_gripper() -> None:
+    """The policy returns nothing on a tick it skips for a stale state.
+
+    That empty map must not become "what was last commanded", or a takeover on
+    the very next tick seeds the operator with no gripper at all -- and a
+    gripper seeded from the measurement gives back part of the grip.
+    """
+    source, policy, human = build()
+    policy.effector = 0.3
+    source.poll(states())
+    assert source.commanded_effector == {"left": 0.3, "right": 0.3}
+
+    policy.act = lambda _states: {}  # type: ignore[method-assign]
+    source.poll(states())
+    assert source.commanded_effector == {"left": 0.3, "right": 0.3}
+
+    human.take_pressed = True
+    source.poll(states())
+    assert human.seeds[-1]["effector"] == {"left": 0.3, "right": 0.3}

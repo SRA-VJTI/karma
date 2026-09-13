@@ -9,6 +9,14 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from .exceptions import ConfigurationError
+from .inference import GripperWatch
+from .safety import (
+    StateGuard,
+    joint_limits,
+    report_gripper_start,
+    validate_motion_parameters,
+    warn_stalled_grippers,
+)
 from .teleop_vr import DEFAULT_WS_URL, QuestTeleopSource
 from .types import PositionCommand
 
@@ -29,16 +37,6 @@ def _sleep_until(stop: threading.Event, deadline: float, period: float) -> float
     return time.perf_counter()
 
 
-def _fresh_states(arms: Mapping[str, object], max_age_s: float) -> dict[str, object] | None:
-    states: dict[str, object] = {}
-    for name, arm in arms.items():
-        state = getattr(arm, "latest_state", None)
-        if state is None or not state.is_fresh(max_age_s):
-            return None
-        states[name] = state
-    return states
-
-
 def run_teleop(
     rig: Rig,
     *,
@@ -57,6 +55,7 @@ def run_teleop(
     cannot return while its native processes remain energized, and a stale arm
     state stops sending commands until the state stream recovers.
     """
+    validate_motion_parameters(rate_hz=rate_hz, max_state_age_s=max_state_age_s)
     if rate_hz <= 0:
         raise ConfigurationError("--rate must be positive")
     if max_state_age_s <= 0:
@@ -71,9 +70,13 @@ def run_teleop(
 
     # Imported lazily to keep doctor/zero usable on installations without the
     # VR optional dependencies.
-    from .cli import power_down, power_up
+    from .cli import power_down, power_up, settle_arm_states
 
     stop = stop if stop is not None else threading.Event()
+    limits = joint_limits(rig)
+    guard = StateGuard(rig.names, max_age_s=max_state_age_s)
+    gripper = GripperWatch()
+    stalled_grippers: set[str] = set()
     session = None
     live_arms = []
     source: QuestTeleopSource | None = None
@@ -85,6 +88,7 @@ def run_teleop(
                 "Quest teleoperation needs follower arms only; leaders cannot accept "
                 "direct joint targets"
             )
+        report_gripper_start(settle_arm_states(live_arms, max_age_s=max_state_age_s))
         source = QuestTeleopSource(
             tuple(arms),
             ws_url=ws_url,
@@ -99,7 +103,7 @@ def run_teleop(
         next_tick = time.perf_counter()
         stale_names: tuple[str, ...] | None = None
         while not stop.is_set():
-            states = _fresh_states(arms, max_state_age_s)
+            states = guard.check({name: arm.latest_state for name, arm in arms.items()})
             if states is None:
                 stale: list[str] = []
                 for name, arm in arms.items():
@@ -121,24 +125,31 @@ def run_teleop(
                 stale_names = None
 
             step = source.poll(states)  # type: ignore[arg-type]
+            commands = {}
             for name, target in step.targets.items():
                 arm = arms.get(name)
                 if arm is None:
                     raise ConfigurationError(f"Quest teleoperator commanded unknown arm {name!r}")
-                arm.command(
-                    PositionCommand(
-                        position_rad=np.asarray(target.position_rad, dtype=np.float64),
-                        effector=target.effector,
-                    )
+                positions = np.asarray(target.position_rad, dtype=np.float64)
+                lower, upper = limits[name]
+                if positions.shape != lower.shape or not np.all(np.isfinite(positions)):
+                    raise ConfigurationError(f"invalid joint targets for {name}")
+                commands[name] = PositionCommand(
+                    position_rad=np.clip(positions, lower, upper),
+                    effector=target.effector,
                 )
+            # Validate every arm before issuing any of this tick's commands.
+            for name, command in commands.items():
+                arms[name].command(command)
+            gripper.observe(commands, states)
+            warn_stalled_grippers(gripper, stalled_grippers)
             next_tick = _sleep_until(stop, next_tick, period)
     except KeyboardInterrupt:
         print()
     finally:
-        if source is not None:
-            source.close()
-        if session is not None:
-            failures = power_down(session, live_arms, park=park)
-        else:
-            failures = 0
+        try:
+            if source is not None:
+                source.close()
+        finally:
+            failures = power_down(session, live_arms, park=park) if session is not None else 0
     return 1 if failures else 0

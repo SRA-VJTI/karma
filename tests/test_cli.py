@@ -836,8 +836,9 @@ def test_record_refuses_a_nonsense_frame_rate(capsys) -> None:
 
 
 def test_record_preflight_treats_a_missing_camera_as_fatal(
-    fake_camera_bus, no_mesh_cache, capsys
+    fake_camera_bus, no_mesh_cache, capsys, monkeypatch
 ) -> None:
+    monkeypatch.setattr(cli, "check_camera_modes", lambda rig: [])
     # Unlike `doctor`, recording with a view silently absent produces a dataset
     # that is wrong rather than a cell that is merely unchecked.
     fake_camera_bus(["348523020354"])  # top only; both wrists missing
@@ -1328,3 +1329,114 @@ def test_settle_arm_states_treats_a_missing_state_as_not_ready() -> None:
     arms = [SimpleNamespace(name="left", arm=SimpleNamespace(latest_state=None))]
     with pytest.raises(cli.InferenceError, match="no fresh state from left"):
         cli.settle_arm_states(arms, timeout_s=0.05, poll_s=0.0)
+
+
+@pytest.mark.parametrize(
+    "choices,indices,park_failure",
+    [
+        (["y", "d", "n", "y"], [0, None, 1, 2], False),
+        (["d", "d", "y", "n", "y"], [None, None, 0, 1, 2], False),
+        ([KeyboardInterrupt], [0], False),
+        ([EOFError], [0], False),
+        ([], [0], True),
+    ],
+)
+def test_hitl_reviews_after_parking_and_keeps_indices_contiguous(
+    monkeypatch, tmp_path, choices, indices, park_failure
+):
+    from openpi_control import dagger, record
+
+    writer = record.MemorySink()
+    manifest = {"episodes": []}
+    parked = []
+    monkeypatch.setattr(cli, "power_up", lambda *a, **k: (object(), []))
+    monkeypatch.setattr(cli, "settle_arm_states", lambda *a: {})
+    monkeypatch.setattr(cli, "power_down", lambda *a, **k: parked.append(True) or int(park_failure))
+    monkeypatch.setattr(cli, "InferenceRolloutSource", lambda **k: object())
+    monkeypatch.setattr(
+        dagger,
+        "DaggerSource",
+        lambda **k: SimpleNamespace(
+            stats=dagger.InterventionStats(), describe=lambda: "test", close=lambda: None
+        ),
+    )
+
+    def capture(**kwargs):
+        sink = kwargs["sink"]
+        sink.add_frame({"attempt": len(parked)})
+        sink.save_episode()
+        return SimpleNamespace(ended_by="source stopped")
+
+    monkeypatch.setattr(record, "record_session", capture)
+    answers = iter(choices)
+    prompt_numbers = []
+    resets = []
+
+    def answer(message):
+        if message.startswith("Reset"):
+            resets.append(len(parked))
+            return ""
+        if message.startswith("Prompt"):
+            expected = len(writer.episodes) + 1
+            assert message == f"Prompt for episode {expected}/3: "
+            prompt_numbers.append(expected)
+            return "fold the towel"
+        assert len(parked) == len(manifest["episodes"]) + 1
+        assert len(writer.episodes) == sum(e["saved"] for e in manifest["episodes"])
+        value = next(answers)
+        if isinstance(value, type) and issubclass(value, BaseException):
+            raise value
+        return value
+
+    interrupted = len(choices) == 1
+    context = pytest.raises(KeyboardInterrupt) if interrupted else contextlib.nullcontext()
+    with context:
+        result = cli._hitl_episodes(
+            resolve_rig("yam_bimanual"),
+            client=object(),
+            human=object(),
+            cameras={},
+            sink=writer,
+            scene=None,
+            camera_panel=None,
+            manifest=manifest,
+            manifest_path=tmp_path / "hitl.json",
+            episodes=3,
+            episode_seconds=1,
+            fps=30,
+            speed=1,
+            chunk_size=1,
+            max_step_rad=0.1,
+            max_effector_step=0.1,
+            carry_targets=False,
+            prefetch=False,
+            prefetch_margin_s=0,
+            wait_between_episodes=True,
+            backend_factory=None,
+            input_fn=answer,
+        )
+    if interrupted or park_failure:
+        if park_failure:
+            assert result == 1
+        assert writer.episodes == [[{"attempt": 0}]]
+        assert manifest["episodes"][0]["success"] is None
+        assert manifest["episodes"][0]["label"] == "unlabeled"
+        assert json.loads((tmp_path / "hitl.json").read_text()) == manifest
+        return
+    assert result == 0
+    assert [e["episode_index"] for e in manifest["episodes"]] == indices
+    assert [e["success"] for e in manifest["episodes"]] == [
+        {"y": True, "n": False}.get(choice) for choice in choices
+    ]
+    assert writer.episodes == [
+        [{"attempt": i}] for i, choice in enumerate(choices) if choice != "d"
+    ]
+    assert [e["attempt"] for e in manifest["episodes"]] == list(range(1, len(choices) + 1))
+    assert prompt_numbers == [1 + sum(c != "d" for c in choices[:i]) for i in range(len(choices))]
+    assert resets == list(range(1, len(choices)))
+    assert json.loads((tmp_path / "hitl.json").read_text()) == manifest
+
+
+def test_hitl_review_rejects_empty_and_invalid_answers():
+    answers = iter(["", "maybe", "DISCARD"])
+    assert cli._hitl_review(lambda _: next(answers), 1) == "d"

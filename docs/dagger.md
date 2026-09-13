@@ -124,9 +124,21 @@ the one the operator can reason about while reaching into a moving cell.
 
 ## Session shape
 
-Same as `rollout`: a prompt per attempt, a timed run, both arms parked, then
-`Episode N successful? [y/n]`. The arms de-energize between attempts so the
-scene can be reset by hand.
+A prompt per attempt, a timed run, both arms parked and de-energized, then:
+
+`Episode N: [y] keep success / [n] keep failure / [d] discard`
+
+- `y` saves the take with `success: true`.
+- `n` saves it with `success: false`; failed rollouts can contain useful corrections.
+- `d` drops the take's buffered frames and video. Previously saved episodes stay intact.
+
+The recorder reports `CAPTURED — awaiting review` before parking; the dataset
+save happens after review. Discarded attempts remain in the HITL manifest with
+`discarded: true`, `saved: false`, `episode_index: null`, and `success: null`.
+Saved episode indices stay contiguous. `--episodes` counts saved episodes.
+Discarding episode 2 retries episode 2 after the scene reset; only keeping a
+take advances the episode number. The manifest counts every attempt separately.
+The scene can be reset by hand between attempts.
 
 The relay, the USB tunnel, and the headset connection are opened once around
 the whole run instead of per attempt — dropping the operator's WebSocket every
@@ -138,10 +150,12 @@ when the towel is folded or on the floor, and the clock only catches the
 attempt you forgot about. The clock runs during interventions too, so two
 attempts stay comparable however much help one of them needed.
 
-Ctrl-C during an attempt does exactly what holding Y does — saves the frames
-already captured, parks both arms, and continues to the label prompt — the same
-as `rollout` and deliberately unlike `collect`. A second Ctrl-C at a prompt
-exits the run.
+Ctrl-C during an attempt keeps the captured frames pending, parks both arms,
+and opens the same review prompt. Ctrl-C or end-of-input at review saves the
+pending take with `success: null` and `label: "unlabeled"`, writes the manifest,
+and exits. A parking failure also preserves the take without an outcome label
+and stops the session. An ordinary discard requires an explicit `d`.
+Manifest updates replace the previous JSON atomically.
 
 ## What it checks before it drives
 
@@ -154,11 +168,18 @@ every request. Nothing is energized if a check fails. `--skip-preflight` opts
 out.
 
 **It waits for the first arm state.** `power_up` returns when the nodes are
-energized, which is before either has necessarily published. The policy treats
-a stale state as fatal, so the session used to die on a state a millisecond
-over the 250 ms limit, one tick after energizing. It now waits for both arms to
-start streaming and says so; ten seconds of silence is still a hard failure,
+energized, which is before either has necessarily published. It waits for both
+arms to start streaming and says so; ten seconds of silence is a hard failure,
 because a node that has not published by then is not late, it is not running.
+
+**It rides out a short state gap mid-attempt.** A state's age is measured from
+when this process *received* it, so a gap of a few hundred milliseconds is the
+recording process running late, not the arm going away — the node logs nothing
+and holds position throughout. Such a tick is skipped: no action is spent, no
+inference is requested, and the recorder writes no frame for it, discarding the
+attempt only if the stall outlasts its own `max_stall_s`. An arm silent for a
+full second is still a fault and stops the run. Before this, a 50-attempt
+session died in its first attempt on a state 264 ms old.
 
 **It states the gripper before anything moves.** The measured opening of each
 gripper is printed at the top of every attempt:

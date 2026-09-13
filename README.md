@@ -548,6 +548,7 @@ owns the power-on and power-off that a live view implies. See
 | [docs/cli.md](docs/cli.md) | `doctor` checks, `zero` safeguards, rigs, `live` power on/off |
 | [docs/cameras.md](docs/cameras.md) | camera identity, discovery, the two D405 serials, capture rates |
 | [docs/recording.md](docs/recording.md) | LeRobot datasets, VR teleop, gripper polarity, episode boundaries |
+| [docs/safety.md](docs/safety.md) | Shared runtime checks, stop conditions, and shutdown behavior |
 | [docs/inference.md](docs/inference.md) | MolmoAct2 HTTP inference, action chunks, and hardware execution |
 | [docs/dagger.md](docs/dagger.md) | human-in-the-loop recording, the handoff buttons, the `intervention` column |
 | [docs/viser.md](docs/viser.md) | render modes, mesh sourcing, rigs, joint ordering |

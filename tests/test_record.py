@@ -966,3 +966,30 @@ def test_the_schema_declares_extra_columns_alongside_the_recorded_ones() -> None
 def test_an_extra_feature_cannot_shadow_a_recorded_feature() -> None:
     with pytest.raises(ConfigurationError, match="collides"):
         build_features(["left_gripper"], {}, {"action": {"dtype": "float32", "shape": (1,)}})
+
+
+def test_bounded_human_targets_match_recorded_actions():
+    _, sink, arms = run(
+        [
+            TeleopStep(targets={"left": ArmTarget((10.0,) * 6, 0.5)}, event=EpisodeEvent.START),
+            TeleopStep(event=EpisodeEvent.SAVE),
+        ],
+        command_limits={"left": (np.full(6, -1.0), np.full(6, 1.0))},
+    )
+    np.testing.assert_array_equal(arms["left"].commands[0].position_rad, np.ones(6))
+    np.testing.assert_array_equal(sink.episodes[0][0]["action"][:6], np.ones(6))
+
+
+def test_invalid_second_arm_command_does_not_move_first_arm():
+    arms = {"left": FakeArm(), "right": FakeArm()}
+    with pytest.raises(ConfigurationError, match="invalid joint targets for right"):
+        run(
+            [
+                TeleopStep(
+                    targets={"left": ArmTarget((0.5,) * 6), "right": ArmTarget((float("nan"),) * 6)}
+                )
+            ],
+            arms=arms,
+        )
+    assert not arms["left"].commands
+    assert not arms["right"].commands

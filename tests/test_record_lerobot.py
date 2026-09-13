@@ -46,9 +46,7 @@ def sink(tmp_path, *, fps: int = 30, cameras: bool = True) -> LeRobotSink:
     )
 
 
-def frame(
-    joint: float, gripper: float, *, red: int = 0, camera: bool = True
-) -> dict[str, object]:
+def frame(joint: float, gripper: float, *, red: int = 0, camera: bool = True) -> dict[str, object]:
     """One row. ``red`` tags the image so frames can be told apart.
 
     LeRobot rejects a frame whose keys do not match the schema exactly, so a
@@ -105,9 +103,7 @@ def test_cameras_are_stored_as_video_not_a_pile_of_images(tmp_path) -> None:
     assert not [name for name in on_disk if name.endswith(".png")]
 
 
-def test_svt_encoder_is_quiet_and_uses_a_supported_preset(
-    tmp_path, monkeypatch, capfd
-) -> None:
+def test_svt_encoder_is_quiet_and_uses_a_supported_preset(tmp_path, monkeypatch, capfd) -> None:
     # SVT bypasses Python/FFmpeg log levels and writes its banner directly to
     # stderr.  Capture at the file-descriptor level so this test sees the same
     # native output that otherwise floods an operator's terminal.
@@ -238,3 +234,25 @@ def test_a_high_rate_dataset_records_its_real_rate(tmp_path) -> None:
     # Timestamps must step at the declared rate, not at 30.
     steps = np.diff([float(dataset[i]["timestamp"]) for i in range(4)])
     assert steps == pytest.approx([1 / 90] * 3, abs=1e-6)
+
+
+def test_review_discard_then_save_preserves_real_video_dataset(tmp_path):
+    from openpi_control.record import ReviewSink
+
+    writer = sink(tmp_path)
+    review = ReviewSink(writer)
+    for _ in range(5):
+        review.add_frame(frame(1.0, DATASET_GRIPPER_CLOSED, red=11))
+    review.save_episode()
+    assert writer.num_episodes == 0
+    review.discard_episode()
+    for _ in range(3):
+        review.add_frame(frame(2.0, DATASET_GRIPPER_OPEN, red=200))
+    review.save_episode()
+    review.commit()
+    review.finalize()
+    dataset = LeRobotDataset("local/test", root=tmp_path / "ds")
+    assert dataset.num_episodes == 1
+    assert dataset.num_frames == 3
+    assert [float(dataset[i]["action"][0]) for i in range(3)] == [2.0] * 3
+    assert float(dataset[0]["observation.images.top"][0].mean()) > 0.5
