@@ -1061,4 +1061,6 @@ def _require_lerobot():  # noqa: ANN202 - the lerobot dataset module, Any by des
             "needs Python 3.12 or newer, so on 3.11 the extra resolves to "
             "nothing and this is the error you get."
         ) from err
+    if getattr(lerobot_dataset, "CODEBASE_VERSION", None) != "v3.0":
+        raise ConfigurationError("Karma requires the LeRobot v3.0 writer; run uv sync --locked")
     return lerobot_dataset

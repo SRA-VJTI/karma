@@ -26,7 +26,7 @@ IDs 1–5 and its gripper uses ID 6, at 1,000,000 baud. Replace `/dev/ttyACM0`
 below with your adapter path (prefer `/dev/serial/by-id/...` when available).
 
 ```bash
-uv run --no-default-groups --extra vr openpi doctor --rig so101 --interface-override right=/dev/ttyACM0
+uv run karma doctor --rig so101 --interface-override right=/dev/ttyACM0
 ```
 
 The packaged geometry is `SO101.urdf`, derived from `so101_new_calib.urdf`, and
@@ -39,12 +39,70 @@ directions agree with the packaged model before Cartesian teleoperation.
 Do not run `openpi zero` at an arbitrary pose: it writes the current pose as the
 servo zero. See [zeroing instructions](cli.md#zero) if calibration is needed.
 
+## Calibrate this arm and record home
+
+Close teleop first, leave the arm powered, and support it. Run:
+
+```bash
+uv run karma calibrate-so101 \
+  --interface /dev/ttyACM0 --output calibration/so101-right.json --center-encoders
+```
+
+The wizard disables torque and asks you to place each joint near the middle of
+its travel, with the gripper halfway open and wrist roll at its intended middle
+orientation. It backs up the existing firmware registers beside the output file
+before setting encoder midpoints. This prevents the encoder boundary from falling
+inside a joint's working travel. Older calibration profiles become stale.
+
+Next, move the shoulder, elbow, wrist flex, and gripper through their full travel
+by hand without forcing the stops. **Do not sweep wrist roll**: the wizard uses
+its full single-turn encoder range, as LeRobot does. Fully open and close the
+gripper. Press Enter after the sweep, capture the fully closed and fully open gripper when prompted,
+then position the arm and gripper at your desired home and capture it. The closed-jaw
+check is separate from home: home may have an open gripper. A failed closed-jaw
+check lets you retry while keeping the recorded sweep. Closed/open captures define
+the gripper range, with the sweep used only to check plausible travel. Gripper
+capture ignores other joints moving; an unsteady capture retries without losing
+the sweep. Torque
+remains off afterwards; the wizard does not command the arm to move.
+
+This creates a **native SO101 profile**, not a drop-in LeRobot calibration file.
+It records the new firmware homing offsets and preserves the native 4096-count
+radian scale. For stock SO101 geometry, measured mechanical range midpoints are
+aligned to the packaged model's range midpoints. The gripper direction is inferred from the captured endpoints and applied through
+the native servo direction setting, preserving 0 = closed and 1 = open.
+Incomplete travel or a wrap in a non-roll joint is rejected. If a joint still wraps, repeat
+centering with that joint closer to the middle of its mechanical travel.
+
+Omit `--center-encoders` only if the encoders are already centered and you want
+to preserve firmware offsets. That mode writes no EEPROM and requires manually
+recording all six ranges, including wrist roll, without crossing the encoder
+boundary. The profile is saved only after the complete calibration succeeds.
+
+Start teleop with that profile:
+
+```bash
+uv run karma teleop \
+  --rig so101 --interface right=/dev/ttyACM0 \
+  --calibration right=calibration/so101-right.json --rate 50 --open-quest
+```
+
+The profile generates adjacent `.arm.json` and `.gripper.json` native instances;
+packaged robot files stay unchanged. Offsets apply in the native driver, and
+measured limits are intersected with the model limits for both IK and command
+validation. The saved home is used for Ctrl+C parking and, unless overridden,
+thumbstick return-to-rest. Home is a joint target relative to calibration;
+it never changes the calibrated zero. A fresh calibration is required if a
+servo's firmware homing offset changes. Keep the profile for this physical arm;
+the local `calibration/` folder is ignored by Git. Existing output files are
+never overwritten by the wizard.
+
 ## Run
 
 With the Quest connected over USB and USB debugging authorized:
 
 ```bash
-uv run --no-default-groups --extra vr openpi teleop --rig so101 \
+uv run karma teleop --rig so101 \
   --interface right=/dev/ttyACM0 --rate 50 --open-quest
 ```
 
@@ -65,7 +123,7 @@ interrupts parking. Add `--no-park` only to power down in place.
 For two SO101 followers:
 
 ```bash
-uv run --no-default-groups --extra vr openpi teleop --rig so101_bimanual \
+uv run karma teleop --rig so101_bimanual \
   --interface left=/dev/ttyACM0 --interface right=/dev/ttyACM1 \
   --rate 50 --open-quest
 ```

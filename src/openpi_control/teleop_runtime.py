@@ -75,6 +75,24 @@ def run_teleop(
     # VR optional dependencies.
     from .cli import power_down, power_up, settle_arm_states
 
+    config_overrides = dict(config_overrides or {})
+    if any(arm.calibration_file is not None for arm in rig.arms):
+        from .so101_calibration import load_profile, verify_firmware
+
+        verify_firmware(rig)
+        for arm in rig.arms:
+            if arm.calibration_file is None:
+                continue
+            instance = load_profile(arm.calibration_file)["arm_instance"]
+            config_overrides.setdefault(
+                f"rest_qpos_{arm.name}",
+                [j["servos"][0]["home_pos"] for j in instance["joints"]],
+            )
+            config_overrides[f"joint_limits_{arm.name}"] = [
+                [j["servos"][0]["pos_min"], j["servos"][0]["pos_max"]]
+                for j in instance["joints"]
+            ]
+
     stop = stop if stop is not None else threading.Event()
     limits = joint_limits(rig)
     guard = StateGuard(rig.names, max_age_s=max_state_age_s)

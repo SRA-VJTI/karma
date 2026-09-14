@@ -32,32 +32,21 @@ from __future__ import annotations
 
 import types
 
-from openpi_control.servos import dm_can, dxl_serial, encos_can, ft_serial, trossen_eth
+from openpi_control.servos import dm_can, ft_serial
 
 # Servo model string -> driver module, or None for read-only encoders whose
 # zero is fixed in hardware (reported as skipped by the zeroing tool, never
 # as a failure).
 SERVO_ZERO_DRIVERS: dict[str, types.ModuleType | None] = {
+    "CAN Passive Encoder": None,
     "DM J4310": dm_can,
     "DM J4340": dm_can,
     "DM J3507": dm_can,
     "DM S3519": dm_can,
-    "Encos EC-A4310-P2-36": encos_can,
-    "Encos EC-A6013-H20-100": encos_can,
-    "Encos EC-A4315-P2-36": encos_can,
-    "Encos EC-A6408-P2-25": encos_can,
-    "Encos EC-A10020-P2-24": encos_can,
-    "Dynamixel XM430-W210": dxl_serial,
-    "Dynamixel XH430-W210": dxl_serial,
-    "Dynamixel XC330-T288": dxl_serial,
-    "Dynamixel XH430-W350": dxl_serial,
     # FeeTech SMS/STS serial (SO-ARM100/101; also covers Hiwonder HX-30HM/HX-10HM).
     "FeeTech STS3215": ft_serial,
     # Whole-arm Ethernet controller joints (zeroed via one EEPROM write).
-    "Trossen WXAI Joint": trossen_eth,
     # Read-only encoders: no motor, zero reference fixed in hardware.
-    "ARX Remote Encoder": None,
-    "CAN Passive Encoder": None,
 }
 
 

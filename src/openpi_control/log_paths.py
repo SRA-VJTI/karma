@@ -13,12 +13,14 @@ import time
 from pathlib import Path
 
 OPENPI_LOG_DIR_ENV = "OPENPI_LOG_DIR"
-DEFAULT_LOG_DIR = "~/openpi-data/logs"
+DEFAULT_LOG_DIR = "logs"
 
 
 def log_dir() -> Path:
     """Return the persistent log directory, creating it if needed."""
-    root = Path(os.environ.get(OPENPI_LOG_DIR_ENV, DEFAULT_LOG_DIR)).expanduser()
+    root = Path(
+        os.environ.get("KARMA_LOG_DIR", os.environ.get(OPENPI_LOG_DIR_ENV, DEFAULT_LOG_DIR))
+    ).expanduser()
     root.mkdir(parents=True, exist_ok=True)
     return root
 

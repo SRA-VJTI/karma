@@ -23,7 +23,7 @@ gravity-compensation model, which needs link inertias and joint origins and
 never needs geometry. Fetch the visual meshes once:
 
 ```bash
-uv run openpi-control-viz --fetch-meshes --model Yam
+uv run karma-viz --fetch-meshes --model Yam
 ```
 
 That downloads I2RT's YAM meshes (MIT) into `~/openpi-data/meshes/Yam/`, beside
@@ -42,8 +42,8 @@ rather than left silent, and that link renders bare.
 GUI sliders drive the joints:
 
 ```bash
-uv run openpi-control-viz --model Yam --effector E_Yam    # one arm
-uv run openpi-control-viz --list                          # models with a URDF
+uv run karma-viz --model Yam --effector E_Yam    # one arm
+uv run karma-viz --list                          # models with a URDF
 ```
 
 Then open <http://localhost:8080>.
@@ -84,8 +84,8 @@ A rig draws a whole cell in one scene, each arm at its own base pose. Still
 hardware-free — the sliders drive the render:
 
 ```bash
-uv run openpi-control-viz --list-rigs
-uv run openpi-control-viz --rig yam_bimanual
+uv run karma-viz --list-rigs
+uv run karma-viz --rig yam_bimanual
 ```
 
 `--rig` takes its models from the rig, so it refuses to be combined with

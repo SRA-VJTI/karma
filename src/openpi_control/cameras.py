@@ -63,7 +63,7 @@ BY_ID_DIR = SYSTEM_BY_ID_DIR
 DEFAULT_COLOR_INDEX = 4
 
 # by-id entries look like:
-#   usb-Intel_R__RealSense_TM__Depth_Camera_405_..._254623070531-video-index4
+#   usb-Intel_R__RealSense_TM__Depth_Camera_405_..._000000000004-video-index4
 # Capture the serial (the digits before ``-video-index``) and the node number.
 #
 # At least six digits, because a camera whose USB descriptor carries no serial
@@ -588,7 +588,7 @@ def sdk_serial_for_asic(asic_serial: str) -> str:
 
     A D405 answers to two numbers. ``/dev/v4l/by-id`` (and the USB descriptor,
     and vr-teleop-kit's ``cams.env``) carry the *ASIC* serial -- e.g.
-    ``254623070531``. The SDK's own ``serial_number`` is a different value --
+    ``000000000004``. The SDK's own ``serial_number`` is a different value --
     e.g. ``352122273221`` -- and that is the one ``enable_device`` wants. Rigs
     declare the ASIC serial because that is the one an operator can actually
     look up without the SDK installed; this bridges the two.

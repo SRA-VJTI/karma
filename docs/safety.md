@@ -1,6 +1,6 @@
 # Runtime safety checks
 
-`uv run openpi infer`, `rollout`, `hitl`, and `teleop` share Python-side
+`uv run karma infer`, `rollout`, `hitl`, and `teleop` share Python-side
 safety checks. Native motor fault handling, torque/thermal protection, command
 limits, and shutdown remain active beneath these checks.
 

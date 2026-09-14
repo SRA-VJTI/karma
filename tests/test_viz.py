@@ -457,7 +457,7 @@ class _FakeReader:
         from openpi_control.cameras import CameraSpec
 
         self.spec = CameraSpec(
-            name=name, label=label, serial="254623070531", device=f"/dev/{name}"
+            name=name, label=label, serial="000000000004", device=f"/dev/{name}"
         )
         self.frames_read = 0
         self._frame = frame

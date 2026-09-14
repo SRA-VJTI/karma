@@ -40,24 +40,10 @@ endif()
 find_package(fmt REQUIRED)
 find_package(Poco REQUIRED COMPONENTS Net Foundation)
 find_package(pinocchio REQUIRED)
-find_package(Franka 0.21.3 EXACT CONFIG REQUIRED)
 pkg_check_modules(PC_ZMQ REQUIRED libzmq)
 pkg_check_modules(PINOCCHIO REQUIRED pinocchio)
 pkg_check_modules(TINYXML2 REQUIRED IMPORTED_TARGET tinyxml2)
 add_library(TinyXML2::TinyXML2 ALIAS PkgConfig::TINYXML2)
-
-find_library(OPENPI_CONTROL_MODBUS_STATIC_LIBRARY NAMES libmodbus.a
-  PATHS "${OPENPI_CONTROL_LIBMODBUS_PREFIX}/lib" NO_DEFAULT_PATH REQUIRED)
-add_library(openpi_control_modbus STATIC IMPORTED)
-set_target_properties(openpi_control_modbus PROPERTIES
-  IMPORTED_LOCATION "${OPENPI_CONTROL_MODBUS_STATIC_LIBRARY}"
-  INTERFACE_INCLUDE_DIRECTORIES "${OPENPI_CONTROL_LIBMODBUS_PREFIX}/include/modbus")
-
-# Trossen iNerve controller SDK (DriverTrossen). Provisioned by
-# scripts/build_deps.sh from the pinned TrossenRobotics/trossen_arm release
-# (prebuilt static lib + headers); provides the imported STATIC target
-# `libtrossen_arm`.
-find_package(libtrossen_arm REQUIRED)
 
 # Let CMake's runtime dependency scanner resolve local build dependencies
 # without hard-coding those directories into the installed executable.
@@ -93,13 +79,8 @@ set(COMMON_SOURCES
   src/pi_topic_zmq.cpp
   src/pi_driver.cpp
   src/pi_driver_can_mit.cpp
-  src/pi_driver_arx_encoder.cpp
   src/pi_driver_can.cpp
   src/pi_driver_controller.cpp
-  src/pi_driver_trossen.cpp
-  src/pi_driver_fr3.cpp
-  src/pi_fr3_controller.cpp
-  src/pi_robotiq.cpp
   # Serial bus-servo stack (protocol-neutral DriverSerial + FeeTech; a future
   # Dynamixel port adds pi_driver_dxl.cpp / pi_servo_dxl.cpp here).
   src/pi_driver_serial.cpp
@@ -115,7 +96,6 @@ set(COMMON_SOURCES
   src/pi_device_arm.cpp
   src/pi_device_arm_can.cpp
   src/pi_device_arm_serial.cpp
-  src/pi_device_fr3.cpp
   src/pi_device_effector.cpp
   src/pi_device_effector_can.cpp
   src/pi_device_effector_controller.cpp
@@ -132,33 +112,15 @@ set(COMMON_SOURCES
 
 )
 
-# ---------------------------------------------------------------------------
-# libpi_trossen_shim: isolation boundary around the prebuilt libtrossen_arm.a.
-# The vendor archive statically bundles its own pinocchio/urdfdom/tinyxml2;
-# linking it into the node directly makes those symbols interpose with the
-# node's shared pinocchio and mixes two pinocchio builds in one process
-# (SIGSEGV in ModelTpl::addJoint during TrossenArmDriver::configure). The
-# archive is therefore linked into this dedicated shared library and its
-# symbols are hidden from the dynamic symbol table, so only the
-# TrossenArmShim API (compiled here, not from the archive) is exported.
-# ---------------------------------------------------------------------------
-add_library(pi_trossen_shim SHARED src/pi_trossen_shim.cpp)
-target_include_directories(pi_trossen_shim PRIVATE include)
-target_link_libraries(pi_trossen_shim PRIVATE libtrossen_arm pthread)
-# Mark every symbol pulled from static archives (i.e. libtrossen_arm.a and
-# its bundled third-party copies) as LOCAL in the .so's dynamic symbol
-# table. Internal references bind at link time; nothing leaks out.
-target_link_options(pi_trossen_shim PRIVATE "LINKER:--exclude-libs,ALL")
-
 add_executable(${OPENPI_CONTROL_TARGET} ${COMMON_SOURCES})
 
 target_link_libraries(${OPENPI_CONTROL_TARGET}
   ${PC_ZMQ_LDFLAGS}
   ${PINOCCHIO_LDFLAGS}
   Boost::program_options
-  pi_trossen_shim
-  Franka::Franka
-  openpi_control_modbus
+
+
+
 )
 target_link_options(${OPENPI_CONTROL_TARGET} PRIVATE "LINKER:--exclude-libs,ALL")
 
@@ -189,9 +151,9 @@ if(OPENPI_CONTROL_BUILD_TESTING)
     ${PC_ZMQ_LDFLAGS}
     ${PINOCCHIO_LDFLAGS}
     Boost::program_options
-    pi_trossen_shim
-    Franka::Franka
-    openpi_control_modbus
+
+
+
   )
   gtest_discover_tests(
     pi_topic_zmq_tests
@@ -202,11 +164,6 @@ endif()
 install(TARGETS ${OPENPI_CONTROL_TARGET}
   RUNTIME_DEPENDENCY_SET openpi_control_runtime_dependencies
   RUNTIME DESTINATION openpi_control/bin)
-
-# The shim is a build product (not scanned as an external runtime dependency),
-# so bundle it explicitly next to the other shared libraries; the node's
-# $ORIGIN/../libs RPATH resolves it after wheel installation.
-install(TARGETS pi_trossen_shim LIBRARY DESTINATION openpi_control/libs)
 
 # Ship the node's complete non-system shared-library closure. The executable's
 # $ORIGIN/../libs RPATH above resolves these files after wheel installation;
@@ -252,9 +209,9 @@ if(OPENPI_CONTROL_BUILD_FUZZERS)
       ${PC_ZMQ_LDFLAGS}
       ${PINOCCHIO_LDFLAGS}
       Boost::program_options
-      pi_trossen_shim
-      Franka::Franka
-      openpi_control_modbus
+
+
+
     )
   endforeach()
 endif()

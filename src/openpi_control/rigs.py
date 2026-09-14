@@ -54,29 +54,12 @@ ROLES = (ROLE_FOLLOWER, ROLE_LEADER)
 # cell that is built to a different width overrides the base positions.
 YAM_BIMANUAL_SEPARATION_M = 0.61
 
-# Serial numbers of the RealSenses on the bimanual cell. A serial is the only
-# handle on a camera that survives a replug, so it -- not a /dev path -- is what
-# the rig pins. Swap a camera, edit the serial here; nothing else in the tree
-# needs to know.
-#
-# These are ASIC serials, the number in the /dev/v4l/by-id path, because that is
-# the one an operator can read off the bus without the SDK installed.
-# `cameras.sdk_serial_for_asic` bridges to the SDK's own serial when a stream is
-# actually opened.
-#
-# The wrists are D405s. The top is a D435, which differs in one way the rig has
-# to carry: it publishes no serial in its USB descriptor at all, so udev cannot
-# name it and discovery falls back to the SDK. It used to differ in a second
-# way -- a USB 2.0 link left it without an 848x480 colour mode, so it captured
-# 640x480 through a `YAM_TOP_CAPTURE` override. It is on USB 3 now (848x480 and
-# 640x360 both enumerate at 30 fps, checked 2026-09-13), so the override is
-# gone and the top camera takes the rig default like the wrists. That also puts
-# every view the policy is handed at 16:9, matching MolmoAct2's 640x360
-# training frames; 640x480 was the one input that was 4:3.
+# Deliberately synthetic serials: configure each physical camera with
+# --camera-serial ROLE=SERIAL. Never commit workstation camera identities.
 YAM_BIMANUAL_CAMERA_SERIALS = {
-    "top": "348523020354",
-    "left_wrist": "254623070863",
-    "right_wrist": "254623070417",
+    "top": "000000000001",
+    "left_wrist": "000000000002",
+    "right_wrist": "000000000003",
 }
 
 
@@ -95,6 +78,8 @@ class RigArm:
     role: str = ROLE_FOLLOWER
     effector_model: str | None = None
     instance_config: Path | None = None
+    effector_instance_config: Path | None = None
+    calibration_file: Path | None = None
     base_position: tuple[float, float, float] = (0.0, 0.0, 0.0)
     base_rotation_wxyz: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
 
@@ -131,6 +116,7 @@ class RigArm:
             connection_for_interface(self.interface),
             effector_model=self.effector_model,
             instance_config=self.instance_config,
+            effector_instance_config=self.effector_instance_config,
         )
 
     def with_interface(self, interface: str) -> RigArm:
@@ -145,6 +131,7 @@ class Rig:
     description: str
     arms: tuple[RigArm, ...] = field(default_factory=tuple)
     cameras: tuple[RigCamera, ...] = field(default_factory=tuple)
+    policy_norm_tag: str | None = None
 
     def __post_init__(self) -> None:
         if not self.arms:
@@ -152,9 +139,7 @@ class Rig:
         seen: set[str] = set()
         for arm in self.arms:
             if arm.name in seen:
-                raise ConfigurationError(
-                    f"rig {self.name!r} declares two arms named {arm.name!r}"
-                )
+                raise ConfigurationError(f"rig {self.name!r} declares two arms named {arm.name!r}")
             seen.add(arm.name)
         camera_names: set[str] = set()
         camera_serials: dict[str, str] = {}
@@ -242,9 +227,7 @@ class Rig:
             # view of an arm that is not powered would put a frozen image in
             # every frame of the dataset.
             cameras=tuple(
-                camera
-                for camera in self.cameras
-                if camera.arm is None or camera.arm in keep
+                camera for camera in self.cameras if camera.arm is None or camera.arm in keep
             ),
         )
 
@@ -272,9 +255,7 @@ class Rig:
             return self
         return dataclasses.replace(
             self,
-            cameras=tuple(
-                dataclasses.replace(camera, **changes) for camera in self.cameras
-            ),
+            cameras=tuple(dataclasses.replace(camera, **changes) for camera in self.cameras),
         )
 
 
@@ -335,10 +316,13 @@ def _so101(*, bimanual: bool = False) -> Rig:
     hands = ("left", "right") if bimanual else ("right",)
     return Rig(
         name="so101_bimanual" if bimanual else "so101",
-        description="SO101 Quest follower arms over USB serial",
+        description="SO101 follower arms over USB serial",
+        cameras=(RigCamera(name="top", serial="0", label="Top (configure serial)"),),
         arms=tuple(
             RigArm(
-                name=hand, model="SO101", interface=f"/dev/ttyACM{index}",
+                name=hand,
+                model="SO101",
+                interface=f"/dev/ttyACM{index}",
                 effector_model="E_SO101",
                 base_position=(0.0, (0.2 if hand == "left" else -0.2) if bimanual else 0.0, 0.0),
             )

@@ -666,7 +666,7 @@ def fake_camera_bus(monkeypatch, tmp_path):
 def test_camera_checks_pass_when_every_declared_camera_is_present(
     fake_camera_bus,
 ) -> None:
-    fake_camera_bus(["348523020354", "254623070863", "254623070417"])
+    fake_camera_bus(["000000000001", "000000000002", "000000000003"])
 
     results = cli.run_camera_checks(resolve_rig("yam_bimanual"))
 
@@ -682,7 +682,7 @@ def test_camera_checks_pass_when_every_declared_camera_is_present(
 def test_a_missing_camera_only_warns_for_doctor(fake_camera_bus) -> None:
     # Cameras are not needed to drive an arm, so an unplugged wrist camera must
     # not stop `doctor` from green-lighting the cell.
-    fake_camera_bus(["348523020354"])
+    fake_camera_bus(["000000000001"])
 
     results = cli.run_camera_checks(resolve_rig("yam_bimanual"))
 
@@ -695,18 +695,18 @@ def test_a_missing_camera_only_warns_for_doctor(fake_camera_bus) -> None:
 def test_a_missing_camera_is_fatal_when_the_caller_needs_it(fake_camera_bus) -> None:
     # The recorder passes required=True: writing an episode with a view
     # silently absent is worse than refusing to start.
-    fake_camera_bus(["348523020354"])
+    fake_camera_bus(["000000000001"])
 
     results = cli.run_camera_checks(resolve_rig("yam_bimanual"), required=True)
 
     assert sum(1 for r in results if r.status == cli._FAIL) == 2
-    assert any("254623070863" in r.detail for r in results)
+    assert any("000000000002" in r.detail for r in results)
 
 
 def test_camera_checks_flag_a_camera_the_rig_does_not_know(fake_camera_bus) -> None:
     # The useful half of "the top view is missing" is usually "and here is the
     # serial of the camera that replaced it".
-    fake_camera_bus(["348523020354", "254623070863", "254623070417", "999999999999"])
+    fake_camera_bus(["000000000001", "000000000002", "000000000003", "999999999999"])
 
     results = cli.run_camera_checks(resolve_rig("yam_bimanual"))
 
@@ -716,7 +716,7 @@ def test_camera_checks_flag_a_camera_the_rig_does_not_know(fake_camera_bus) -> N
 
 
 def test_narrowing_to_one_arm_stops_checking_the_other_wrist(fake_camera_bus) -> None:
-    fake_camera_bus(["348523020354", "254623070417"])
+    fake_camera_bus(["000000000001", "000000000003"])
 
     results = cli.run_camera_checks(resolve_rig("yam_bimanual").subset(["right"]))
 
@@ -737,7 +737,7 @@ def test_a_rig_with_no_cameras_says_so_instead_of_passing_vacuously(
 
 
 def test_the_cameras_command_exits_nonzero_only_on_a_failure(fake_camera_bus, capsys) -> None:
-    fake_camera_bus(["348523020354"])
+    fake_camera_bus(["000000000001"])
 
     # Two cameras missing, but missing is a warning here, so this still passes.
     assert cli.main(["cameras"]) == 0
@@ -747,7 +747,7 @@ def test_the_cameras_command_exits_nonzero_only_on_a_failure(fake_camera_bus, ca
 def test_pinning_a_camera_to_a_device_that_is_not_there_is_reported(
     fake_camera_bus, tmp_path, capsys
 ) -> None:
-    fake_camera_bus(["348523020354", "254623070863", "254623070417"])
+    fake_camera_bus(["000000000001", "000000000002", "000000000003"])
 
     cli.main(["cameras", "--camera", f"top={tmp_path / 'nope'}"])
 
@@ -760,7 +760,7 @@ def test_a_snapshot_without_a_probe_is_refused_before_anything_opens(
     fake_camera_bus, tmp_path
 ) -> None:
     # --snapshot alone would silently do nothing; saying so beats an empty dir.
-    fake_camera_bus(["348523020354"])
+    fake_camera_bus(["000000000001"])
 
     with pytest.raises(ConfigurationError, match="needs --probe"):
         cli._command_cameras(
@@ -778,7 +778,7 @@ def test_a_snapshot_without_a_probe_is_refused_before_anything_opens(
 def test_doctor_on_a_rig_reports_its_cameras(fake_camera_bus, no_mesh_cache, capsys) -> None:
     # Cameras belong to the rig, not to an arm, so they are checked once rather
     # than repeated under every arm.
-    fake_camera_bus(["348523020354", "254623070863", "254623070417"])
+    fake_camera_bus(["000000000001", "000000000002", "000000000003"])
 
     cli.main(["doctor", "--rig", "yam_bimanual"])
 
@@ -841,7 +841,7 @@ def test_record_preflight_treats_a_missing_camera_as_fatal(
     monkeypatch.setattr(cli, "check_camera_modes", lambda rig: [])
     # Unlike `doctor`, recording with a view silently absent produces a dataset
     # that is wrong rather than a cell that is merely unchecked.
-    fake_camera_bus(["348523020354"])  # top only; both wrists missing
+    fake_camera_bus(["000000000001"])  # top only; both wrists missing
 
     status = cli.main(["record", "--dry-run", "--task", "t"])
 
@@ -851,7 +851,7 @@ def test_record_preflight_treats_a_missing_camera_as_fatal(
 
 
 def test_record_narrows_cameras_with_only(fake_camera_bus, monkeypatch, capsys) -> None:
-    fake_camera_bus(["348523020354", "254623070417"])
+    fake_camera_bus(["000000000001", "000000000003"])
     seen: dict[str, object] = {}
 
     def fake_run(rig, **kwargs):

@@ -290,9 +290,40 @@ def decode_wire_frame(frame: np.ndarray) -> np.ndarray:
 
 def served_frames(client: MolmoActClient) -> dict[str, np.ndarray]:
     """What the policy last saw, keyed by the rig's camera names."""
-    return {
-        name: decode_wire_frame(frame) for name, frame in client.last_wire_frames.items()
-    }
+    return {name: decode_wire_frame(frame) for name, frame in client.last_wire_frames.items()}
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyContract:
+    arms: tuple[str, ...] = ("left", "right")
+    arm_dof: int = 6
+    cameras: tuple[str, ...] = ("top", "left_wrist", "right_wrist")
+    norm_tag: str = MOLMOACT_NORM_TAG
+    gripper_open: float = 1.0
+
+    @property
+    def dimension(self):
+        return len(self.arms) * (self.arm_dof + 1)
+
+    @classmethod
+    def from_rig(cls, rig):
+        models = {arm.model for arm in rig.arms}
+        if len(models) != 1 or not models <= {"Yam", "SO101"}:
+            raise ConfigurationError("policy rig must contain only YAM or only SO101 followers")
+        dof = 6 if models == {"Yam"} else 5
+        tag = getattr(rig, "policy_norm_tag", None)
+        if tag is None and dof == 5:
+            raise ConfigurationError("SO101 policy requires --norm-tag from its trained checkpoint")
+        return cls(
+            tuple(rig.names),
+            dof,
+            tuple(rig.camera_names),
+            tag or MOLMOACT_NORM_TAG,
+            1.0 if dof == 6 else 0.0,
+        )
+
+
+DEFAULT_CONTRACT = PolicyContract()
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,12 +334,13 @@ class BimanualObservation:
     left_cam: np.ndarray
     right_cam: np.ndarray
     state: np.ndarray
+    contract: PolicyContract = DEFAULT_CONTRACT
 
     def __post_init__(self) -> None:
         state = np.asarray(self.state, dtype=np.float32).reshape(-1)
-        if state.shape != (MOLMOACT_STATE_DIM,):
+        if state.shape != (self.contract.dimension,):
             raise ConfigurationError(
-                f"MolmoAct2 state must have shape ({MOLMOACT_STATE_DIM},), got {state.shape}"
+                f"MolmoAct2 state must have shape ({self.contract.dimension},), got {state.shape}"
             )
         if not np.all(np.isfinite(state)):
             raise ConfigurationError("MolmoAct2 state contains non-finite values")
@@ -322,6 +354,7 @@ class MolmoActClient:
         self,
         server: str | None = None,
         *,
+        contract: PolicyContract = DEFAULT_CONTRACT,
         timeout_s: float = DEFAULT_REQUEST_TIMEOUT_S,
         num_steps: int = DEFAULT_MOLMOACT_NUM_STEPS,
         jpeg_quality: int = DEFAULT_MOLMOACT_JPEG_QUALITY,
@@ -332,6 +365,7 @@ class MolmoActClient:
             raise ConfigurationError("inference request timeout must be positive")
         if num_steps <= 0:
             raise ConfigurationError("inference num_steps must be positive")
+        self.contract = contract
         self.url = normalize_server_url(server)
         self.timeout_s = timeout_s
         self.num_steps = int(num_steps)
@@ -387,12 +421,14 @@ class MolmoActClient:
         if not isinstance(payload, dict) or payload.get("status") != "ok":
             raise InferenceError(f"MolmoAct server is not ready: {payload!r}")
         for key, expected in (
-            ("norm_tag", MOLMOACT_NORM_TAG),
-            ("state_dim", MOLMOACT_STATE_DIM),
-            ("num_cameras", len(MOLMOACT_CAMERA_NAMES)),
+            ("norm_tag", self.contract.norm_tag),
+            ("state_dim", self.contract.dimension),
+            ("num_cameras", len(self.contract.cameras)),
         ):
             actual = payload.get(key)
-            if actual is not None and actual != expected:
+            if (actual is None and self.contract != DEFAULT_CONTRACT) or (
+                actual is not None and actual != expected
+            ):
                 raise InferenceError(
                     f"MolmoAct server at {self.url} reports {key}={actual!r}, "
                     f"but the bimanual YAM contract needs {expected!r}"
@@ -416,21 +452,30 @@ class MolmoActClient:
         graph = self.enable_cuda_graph if enable_cuda_graph is None else bool(enable_cuda_graph)
         json_numpy = _json_numpy()
         quality = self.jpeg_quality
+        if observation.contract != self.contract:
+            raise ConfigurationError("observation does not match the policy contract")
+        available = {
+            "top": observation.top_cam,
+            "left_wrist": observation.left_cam,
+            "right_wrist": observation.right_cam,
+        }
         wire_frames = {
-            "top": encode_frame(observation.top_cam, jpeg_quality=quality),
-            "left_wrist": encode_frame(observation.left_cam, jpeg_quality=quality),
-            "right_wrist": encode_frame(observation.right_cam, jpeg_quality=quality),
+            name: encode_frame(available[name], jpeg_quality=quality)
+            for name in self.contract.cameras
         }
         self.last_wire_frames = wire_frames
         payload = {
-            "top_cam": wire_frames["top"],
-            "left_cam": wire_frames["left_wrist"],
-            "right_cam": wire_frames["right_wrist"],
+            **{
+                {"top": "top_cam", "left_wrist": "left_cam", "right_wrist": "right_cam"}[
+                    name
+                ]: frame
+                for name, frame in wire_frames.items()
+            },
             "instruction": instruction,
             "state": np.asarray(observation.state, dtype=np.float32),
             "timestamp": time.time(),
             "num_steps": steps,
-            "normalization_tag": MOLMOACT_NORM_TAG,
+            "normalization_tag": self.contract.norm_tag,
             "enable_cuda_graph": graph,
         }
         body = json_numpy.dumps(payload)
@@ -462,9 +507,13 @@ class MolmoActClient:
             actions = np.asarray(result["actions"], dtype=np.float64)
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as err:
             raise InferenceError(f"invalid MolmoAct response: {err}") from err
-        if actions.ndim != 2 or actions.shape[1] != MOLMOACT_ACTION_DIM or actions.shape[0] == 0:
+        if (
+            actions.ndim != 2
+            or actions.shape[1] != self.contract.dimension
+            or actions.shape[0] == 0
+        ):
             raise InferenceError(
-                f"MolmoAct actions must have shape (N, {MOLMOACT_ACTION_DIM}), got {actions.shape}"
+                f"MolmoAct actions must have shape (N, {self.contract.dimension}), got {actions.shape}"
             )
         if not np.all(np.isfinite(actions)):
             raise InferenceError("MolmoAct actions contain non-finite values")
@@ -582,15 +631,15 @@ class ChunkPrefetcher:
         self.drop()
 
 
-def _state_for_arm(arm: Any, *, name: str, max_age_s: float) -> ArmState:
+def _state_for_arm(arm: Any, *, name: str, max_age_s: float, contract=DEFAULT_CONTRACT) -> ArmState:
     state = arm.latest_state
     if state is None:
         raise StaleStateError(f"{name} has published no state")
     if not state.is_fresh(max_age_s):
         raise StaleStateError(f"{name} state is {state.age_s * 1e3:.0f} ms old")
-    if state.joints.position_rad.size != MOLMOACT_ARM_DOF:
+    if state.joints.position_rad.size != contract.arm_dof:
         raise ConfigurationError(
-            f"{name} must publish {MOLMOACT_ARM_DOF} arm joints, "
+            f"{name} must publish {contract.arm_dof} arm joints, "
             f"got {state.joints.position_rad.size}"
         )
     if state.effector is None:
@@ -598,28 +647,27 @@ def _state_for_arm(arm: Any, *, name: str, max_age_s: float) -> ArmState:
     return state
 
 
-def measured_vector(states: Mapping[str, ArmState]) -> np.ndarray:
+def measured_vector(states: Mapping[str, ArmState], contract=DEFAULT_CONTRACT) -> np.ndarray:
     """The 14-value ``[left, right]`` vector the state and actions both use."""
     values: list[float] = []
-    for name in MOLMOACT_ARM_NAMES:
+    for name in contract.arms:
         state = states.get(name)
         if state is None:
             raise ConfigurationError(f"MolmoAct2 bimanual inference needs arm {name!r}")
         if state.effector is None:
             raise ConfigurationError(f"{name} must publish a YAM gripper state")
         values.extend(float(value) for value in state.joints.position_rad)
-        values.append(float(state.effector.position))
+        grip = float(state.effector.position)
+        values.append(grip if contract.gripper_open == 1.0 else 1.0 - grip)
     vector = np.asarray(values, dtype=np.float64)
-    if vector.shape != (MOLMOACT_STATE_DIM,):
+    if vector.shape != (contract.dimension,):
         raise ConfigurationError(
-            f"measured state must have shape ({MOLMOACT_STATE_DIM},), got {vector.shape}"
+            f"measured state must have shape ({contract.dimension},), got {vector.shape}"
         )
     return vector
 
 
-def command_lag(
-    commands: Mapping[str, PositionCommand], states: Mapping[str, ArmState]
-) -> float:
+def command_lag(commands: Mapping[str, PositionCommand], states: Mapping[str, ArmState]) -> float:
     """How far the arms are running behind the joint targets they were given.
 
     The largest single-joint gap, in rad, between a commanded target and the
@@ -647,20 +695,21 @@ def build_observation(
     readers: Mapping[str, Any],
     *,
     max_age_s: float = 0.25,
+    contract=DEFAULT_CONTRACT,
 ) -> BimanualObservation:
     """Build the exact left/right and top/left/right ordering the checkpoint uses."""
-    missing_arms = set(MOLMOACT_ARM_NAMES).difference(live_arms)
+    missing_arms = set(contract.arms).difference(live_arms)
     if missing_arms:
         raise ConfigurationError(
             "MolmoAct2 bimanual inference needs arms: " + ", ".join(sorted(missing_arms))
         )
     states = {
-        name: _state_for_arm(live_arms[name], name=name, max_age_s=max_age_s)
-        for name in MOLMOACT_ARM_NAMES
+        name: _state_for_arm(live_arms[name], name=name, max_age_s=max_age_s, contract=contract)
+        for name in contract.arms
     }
 
     frames: dict[str, np.ndarray] = {}
-    for name in MOLMOACT_CAMERA_NAMES:
+    for name in contract.cameras:
         reader = readers.get(name)
         if reader is None:
             raise ConfigurationError(f"MolmoAct2 inference needs camera {name!r}")
@@ -671,28 +720,37 @@ def build_observation(
 
     return BimanualObservation(
         top_cam=frames["top"],
-        left_cam=frames["left_wrist"],
-        right_cam=frames["right_wrist"],
-        state=np.asarray(measured_vector(states), dtype=np.float32),
+        left_cam=frames.get("left_wrist"),
+        right_cam=frames.get("right_wrist"),
+        state=np.asarray(measured_vector(states, contract), dtype=np.float32),
+        contract=contract,
     )
 
 
-def split_action(action: Sequence[float] | np.ndarray) -> dict[str, np.ndarray]:
+def split_action(
+    action: Sequence[float] | np.ndarray, contract=DEFAULT_CONTRACT
+) -> dict[str, np.ndarray]:
     """Split one model action into native arm-plus-effector vectors."""
     vector = np.asarray(action, dtype=np.float64).reshape(-1)
-    if vector.shape != (MOLMOACT_ACTION_DIM,):
+    if vector.shape != (contract.dimension,):
         raise ConfigurationError(
-            f"MolmoAct2 action must have shape ({MOLMOACT_ACTION_DIM},), got {vector.shape}"
+            f"MolmoAct2 action must have shape ({contract.dimension},), got {vector.shape}"
         )
     if not np.all(np.isfinite(vector)):
         raise ConfigurationError("MolmoAct2 action contains non-finite values")
-    return {
-        "left": vector[:7].copy(),
-        "right": vector[7:].copy(),
+    width = contract.arm_dof + 1
+    result = {
+        name: vector[i * width : (i + 1) * width].copy() for i, name in enumerate(contract.arms)
     }
+    if contract.gripper_open == 0.0:
+        for block in result.values():
+            block[-1] = 1.0 - block[-1]
+    return result
 
 
-def split_chunk(actions: Sequence[Sequence[float]] | np.ndarray) -> dict[str, np.ndarray]:
+def split_chunk(
+    actions: Sequence[Sequence[float]] | np.ndarray, contract=DEFAULT_CONTRACT
+) -> dict[str, np.ndarray]:
     """Split a whole action chunk into per-arm blocks, columns kept intact.
 
     The per-arm layout lives in :func:`split_action`; this is the same split
@@ -700,11 +758,14 @@ def split_chunk(actions: Sequence[Sequence[float]] | np.ndarray) -> dict[str, np
     one action -- the Viser overlay, which draws the trail a chunk predicts.
     """
     values = np.asarray(actions, dtype=np.float64)
-    if values.ndim != 2 or values.shape[1] != MOLMOACT_ACTION_DIM:
+    if values.ndim != 2 or values.shape[1] != contract.dimension:
         raise ConfigurationError(
-            f"MolmoAct2 chunk must have shape (N, {MOLMOACT_ACTION_DIM}), got {values.shape}"
+            f"MolmoAct2 chunk must have shape (N, {contract.dimension}), got {values.shape}"
         )
-    return {"left": values[:, :7].copy(), "right": values[:, 7:].copy()}
+    width = contract.arm_dof + 1
+    return {
+        name: values[:, i * width : (i + 1) * width].copy() for i, name in enumerate(contract.arms)
+    }
 
 
 def time_scale(
@@ -725,7 +786,7 @@ def time_scale(
     if speed <= 0:
         raise ConfigurationError("chunk speed must be positive")
     values = np.asarray(actions, dtype=np.float64)
-    if values.ndim != 2 or values.shape[1] != MOLMOACT_ACTION_DIM:
+    if values.ndim != 2 or values.shape[1] not in (6, 12, 14):
         raise ConfigurationError(
             f"MolmoAct2 chunk must have shape (N, {MOLMOACT_ACTION_DIM}), got {values.shape}"
         )
@@ -788,9 +849,7 @@ def start_pose_plan(
     """
     target = np.concatenate(
         [
-            np.asarray(
-                (*MOLMOACT_START_JOINTS[name], MOLMOACT_START_EFFECTOR), dtype=np.float64
-            )
+            np.asarray((*MOLMOACT_START_JOINTS[name], MOLMOACT_START_EFFECTOR), dtype=np.float64)
             for name in MOLMOACT_ARM_NAMES
         ]
     )
@@ -916,6 +975,7 @@ class BoundedChunkExecutor:
     :class:`ReachingChunkExecutor`) proved worse here in practice.
     """
 
+    contract: PolicyContract = DEFAULT_CONTRACT
     max_step_rad: float = DEFAULT_MAX_STEP_RAD
     max_effector_step: float = DEFAULT_MAX_EFFECTOR_STEP
     carry_targets: bool = False
@@ -960,7 +1020,7 @@ class BoundedChunkExecutor:
             states,
             effector=None
             if previous is None
-            else {name: float(previous[name][-1]) for name in MOLMOACT_ARM_NAMES},
+            else {name: float(previous[name][-1]) for name in self.contract.arms},
         )
 
     def seed(
@@ -981,7 +1041,7 @@ class BoundedChunkExecutor:
         which is only right when nothing is being held.
         """
         targets: dict[str, np.ndarray] = {}
-        for name in MOLMOACT_ARM_NAMES:
+        for name in self.contract.arms:
             state = states[name]
             if state.effector is None:
                 raise ConfigurationError(f"{name} must publish a YAM gripper state")
@@ -1003,18 +1063,18 @@ class BoundedChunkExecutor:
     ) -> dict[str, PositionCommand]:
         if self._targets is None:
             raise ConfigurationError("chunk executor must be reset from measured state first")
-        split = split_action(action)
+        split = split_action(action, self.contract)
         commands: dict[str, PositionCommand] = {}
         filed_down = False
         for name, goal in split.items():
             previous = self._targets[name]
-            joint_goal = goal[:MOLMOACT_ARM_DOF]
+            joint_goal = goal[: self.contract.arm_dof]
             if limits is not None and name in limits:
                 lower, upper = limits[name]
                 joint_goal = np.clip(joint_goal, lower, upper)
-            joint_move = joint_goal - previous[:MOLMOACT_ARM_DOF]
+            joint_move = joint_goal - previous[: self.contract.arm_dof]
             bounded_move = np.clip(joint_move, -self.max_step_rad, self.max_step_rad)
-            joint_target = previous[:MOLMOACT_ARM_DOF] + bounded_move
+            joint_target = previous[: self.contract.arm_dof] + bounded_move
             effector_move = float(goal[-1] - previous[-1])
             bounded_effector = float(
                 np.clip(effector_move, -self.max_effector_step, self.max_effector_step)
@@ -1093,9 +1153,7 @@ class ReachingChunkExecutor:
         measured: np.ndarray,
         limits: Mapping[str, tuple[np.ndarray, np.ndarray]] | None,
     ) -> np.ndarray:
-        goal = np.concatenate(
-            [split_action(action)[name] for name in MOLMOACT_ARM_NAMES]
-        )
+        goal = np.concatenate([split_action(action)[name] for name in MOLMOACT_ARM_NAMES])
         if limits is not None:
             # deviation: the reference deployment does not clip to joint limits.
             # Kept because this package knows the URDF's, and clipping an

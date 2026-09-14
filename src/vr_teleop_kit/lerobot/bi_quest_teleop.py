@@ -158,6 +158,8 @@ class BiQuestTeleoperatorConfig(TeleoperatorConfig):
     # the working directory / repo root (see ik/model.py).
     model_path: str = ""
     robot_model: str = "Yam"
+    joint_limits_left: list[list[float]] | None = None
+    joint_limits_right: list[list[float]] | None = None
     # 3x3 rotation (row-major) taking Quest world vectors into the arm
     # base frame. See DEFAULT_R_CALIB above for the convention and the
     # README for how to re-derive it for a different mounting.
@@ -324,6 +326,15 @@ class BiQuestTeleoperator(Teleoperator):
                 from ..ik.so101_ik import SO101IKSolver
 
                 arm_solver = SO101IKSolver(max_dq_per_joint=config.max_dq_per_joint)
+                custom_limits = getattr(config, f"joint_limits_{hand}")
+                if custom_limits is not None:
+                    bounds = np.asarray(custom_limits, dtype=float)
+                    if bounds.shape != (5, 2) or not np.all(np.isfinite(bounds)):
+                        raise ValueError("SO101 calibrated limits must be a finite 5x2 array")
+                    arm_solver.lower = np.maximum(arm_solver.lower, bounds[:, 0])
+                    arm_solver.upper = np.minimum(arm_solver.upper, bounds[:, 1])
+                    if np.any(arm_solver.lower >= arm_solver.upper):
+                        raise ValueError("SO101 calibration has empty joint limits")
                 if np.any(q_rest < arm_solver.lower) or np.any(q_rest > arm_solver.upper):
                     raise ValueError(f"SO101 {hand} rest pose is outside joint limits")
             else:
