@@ -503,8 +503,6 @@ TEST(DriverCanMitTransport, RejectsTruncatedReceivedFrames) {
     driver.handle_received_message(truncated_frame.data(), truncated_frame.size(), truncated_frame.size());
 }
 
-namespace {
-
 TEST(ServoDmParser, DmStatusRejectsNullIndexLookup) {
     CommandLineArgs cla{};
     DriverCanMit driver(nullptr, cla);
