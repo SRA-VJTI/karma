@@ -63,25 +63,35 @@ sudo udevadm control --reload-rules
 Enable developer mode and USB debugging on the Quest, reconnect it, accept the
 headset's prompt; `adb devices` must report `device`.
 
-## 1. Bimanual YAM
+## 1. YAM (bimanual or single arm)
 
-### Arms
+Full walkthrough with CAN pinning, zeros and troubleshooting: [YAM setup](docs/yam-setup.md).
 
-Left on `can0`, right on `can1`, one E_Yam gripper each:
+### Once: i2rt files, CAN buses, meshes
+
+Quest teleop's IK loads the YAM MJCF from an [i2rt](https://github.com/i2rt-robotics/i2rt)
+checkout (not vendored); clone it inside the Karma checkout, where it is found
+automatically and git-ignored. Fetch the browser meshes once too:
 
 ```bash
-ip -brief link show type can
+git clone https://github.com/i2rt-robotics/i2rt.git
+uv run karma-viz --fetch-meshes --model Yam
+```
+
+Each arm is one USB‑CAN adapter. Bring the buses up at 1 Mbit/s and check the arms:
+
+```bash
+ls -l /sys/class/net/can*
 sudo ip link set can0 up type can bitrate 1000000
 sudo ip link set can1 up type can bitrate 1000000
 uv run karma doctor --rig yam_bimanual
 ```
 
-Different adapter names go on every command as `--interface left=BUS --interface right=BUS`.
-
-YAM uses firmware motor zeros and the packaged instance configuration
-(`src/openpi_control/models/arms/Yam/Yam_01.json`); there is no calibration
-JSON. Only write zeros at the manufacturer's mechanical reference pose, never at
-a resting pose — see [YAM setup](docs/yam-setup.md).
+`can0`/`can1` follow USB enumeration order, so either pin names with a udev rule
+(see the setup doc) or pass `--interface left=BUS --interface right=BUS` on every
+command. YAM uses firmware motor zeros and the packaged instance configuration;
+there is no calibration JSON. Only write zeros at the manufacturer's mechanical
+zero pose (`karma zero ... --dry-run` first).
 
 ### Cameras
 
@@ -99,12 +109,24 @@ uv run karma cameras --rig yam_bimanual \
   --camera-serial right_wrist=RIGHT_WRIST_SERIAL --probe
 ```
 
-### Teleop and demonstrations
+### Teleop: both arms or one
 
 ```bash
+# both arms
 uv run karma teleop --rig yam_bimanual \
   --interface left=can0 --interface right=can1 --open-quest
 
+# one arm: same rig, one Quest hand, only that bus is opened
+uv run karma teleop --rig yam_bimanual --arm right --interface right=can0 --open-quest
+uv run karma teleop --rig yam_bimanual --arm left  --interface left=can0  --open-quest
+```
+
+In VR: hold grip to clutch, trigger for the gripper, thumbstick click returns to
+rest. Ctrl+C parks then de-energizes (`--no-park` skips the parking move).
+
+### Demonstrations
+
+```bash
 uv run karma teleop --record --rig yam_bimanual \
   --interface left=can0 --interface right=can1 \
   --camera-serial top=TOP_SERIAL \
@@ -113,14 +135,14 @@ uv run karma teleop --record --rig yam_bimanual \
   --repo-id local/yam-demo --task "fold the towel" --fps 30 --open-quest
 ```
 
-In VR: hold grip to clutch, trigger for the gripper. Ctrl+C parks then
-de-energizes (`--no-park` skips the parking move).
+Single-arm recording: add `--arm right` and declare only `top` and `right_wrist`.
 
 ### Policy: inference, rollout, HITL
 
 Start the YAM MolmoAct2 server on the GPU host first (port 8202, norm tag
 `yam_dual_molmoact2`; see [Model servers](docs/model-servers.md)). The client
-checks the server's health contract before energizing anything.
+checks the server's health contract before energizing anything. The bimanual
+checkpoint needs both arms and all three views.
 
 ```bash
 # Continuous run, one instruction
@@ -282,6 +304,18 @@ runs in your MolmoAct2 environment.
 | [DAgger](docs/dagger.md) | HITL workflow and intervention labels |
 | [Safety](docs/safety.md) | Preflight and runtime checks |
 | [Viser](docs/viser.md) | Browser visualization |
+
+## Acknowledgements
+
+Karma builds on [openpi-basic-control](https://github.com/Physical-Intelligence/openpi-basic-control)
+by Physical Intelligence (the control stack, native runtime, models and policy
+client this repository grew out of) and on
+[vr-teleop-kit](https://github.com/Dream-Machines-Robotics/vr-teleop-kit) by
+Dream Machines (the Quest teleoperation runtime vendored under
+`src/vr_teleop_kit/`, Apache 2.0). The SO101 arm description is
+[SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100) by The Robot Studio;
+the YAM models, MJCF and meshes come from [i2rt](https://github.com/i2rt-robotics/i2rt).
+See [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md).
 
 ## Repository map
 
