@@ -8,9 +8,12 @@ is `v3.0`. There is no v2 output mode.
 ```bash
 uv run karma teleop --record --rig so101 \
   --interface right=/dev/ttyACM0 --calibration right=calibration/so101-right.json \
-  --camera-serial top=TOP_SERIAL --repo-id local/so101-demo \
+  --camera top=/dev/video5 --camera side=/dev/video7 --repo-id local/so101-demo \
   --task "pick up the object" --fps 30 --open-quest
 ```
+
+Cameras are RealSense (`--camera-serial ROLE=SERIAL`) or USB webcams
+(`--camera ROLE=/dev/videoN`); see [cameras](cameras.md).
 
 `--root PATH` chooses the dataset directory; otherwise LeRobot uses its dataset
 cache. Choose a new dataset ID/root for a new run. Upload is opt-in with
@@ -18,8 +21,9 @@ cache. Choose a new dataset ID/root for a new run. Upload is opt-in with
 
 ## Schema
 
-- `observation.state`: measured arm joints in radians plus normalized gripper,
-  in rig order (left then right for bimanual).
+- `observation.state`: measured arm joints in calibrated radians plus normalized
+  gripper, in rig order (left then right for bimanual). Rollout/HITL datasets are
+  in this frame too; a `--policy-frame` only touches the HTTP request.
 - `action`: commanded targets using the same joint order and units.
 - Dataset gripper convention: **0=open, 1=closed** for every robot.
 - `observation.images.NAME`: RGB video for each configured camera role.

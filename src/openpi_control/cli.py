@@ -474,9 +474,11 @@ def run_camera_checks(
                 CheckResult(
                     mark,
                     f"camera {camera.name}",
-                    f"serial {camera.serial} not on the bus"
-                    if camera.name not in (overrides or {})
-                    else f"pinned device {(overrides or {})[camera.name]} does not exist",
+                    f"device {result.missing[camera.name]} does not exist"
+                    if camera.backend == "opencv"
+                    else f"pinned device {(overrides or {})[camera.name]} does not exist"
+                    if camera.name in (overrides or {})
+                    else f"serial {camera.serial} not on the bus",
                 )
             )
             continue
@@ -516,6 +518,13 @@ def check_camera_modes(rig: Rig) -> list[CheckResult]:
     results: list[CheckResult] = []
     for camera in rig.cameras:
         label, size = f"mode {camera.name}", f"{camera.width}x{camera.height}"
+        if camera.backend == "opencv":
+            # V4L2 negotiates at open and never refuses, so the honest answer
+            # is what `--probe` measured, not a mode list.
+            results.append(
+                CheckResult(_OK, label, f"{size}@{camera.fps} requested; opencv negotiates at open")
+            )
+            continue
         try:
             modes = cameras_mod.supported_color_modes(camera.serial)
         except ConfigurationError as err:
@@ -573,7 +582,7 @@ def probe_cameras(
             results.append(CheckResult(_WARN, f"probe {camera.name}", "no device; nothing to open"))
             continue
         try:
-            with cameras_mod.CameraReader(found.spec()) as reader:
+            with cameras_mod.open_camera(found.spec()) as reader:
                 frame = reader.wait_for_frame(warmup_s)
                 if frame is None:
                     results.append(
@@ -866,7 +875,7 @@ def power_down(session: ArmSession, live_arms: list[LiveArm], *, park: bool = Tr
 
 def open_preview_cameras(
     rig: Rig, *, overrides: dict[str, str] | None = None
-) -> dict[str, cameras_mod.CameraReader]:
+) -> dict[str, cameras_mod.AnyCameraReader]:
     """Open every camera of ``rig`` that can be opened, and say what was not.
 
     Deliberately not the recorder's all-or-none open: a dataset with a view
@@ -892,11 +901,11 @@ def open_preview_cameras(
         )
         print(f"  camera   {name:<12} not previewing — {why}")
 
-    readers: dict[str, cameras_mod.CameraReader] = {}
+    readers: dict[str, cameras_mod.AnyCameraReader] = {}
     problems: dict[str, list[str]] = {}
     for name, found in discovery.matched.items():
         try:
-            readers[name] = cameras_mod.CameraReader(found.spec())
+            readers[name] = cameras_mod.open_camera(found.spec())
         except (ConfigurationError, OSError) as err:
             problems.setdefault(str(err), []).append(name)
     for message, names in problems.items():
@@ -979,7 +988,7 @@ def run_live(
     # Cameras before the motors, as in ``record``: opening them is what finds
     # out a camera is held by another process, and finding that out with two
     # arms already energized is worse. Unlike ``record`` it is not fatal here.
-    camera_readers: dict[str, cameras_mod.CameraReader] = {}
+    camera_readers: dict[str, cameras_mod.AnyCameraReader] = {}
     if scene is not None and camera_preview and rig.cameras:
         camera_readers = open_preview_cameras(rig, overrides=camera_overrides)
 
@@ -1048,8 +1057,8 @@ def open_inference_cameras(
     *,
     overrides: dict[str, str] | None = None,
     warmup_s: float = _CAMERA_WARMUP_S,
-) -> dict[str, cameras_mod.CameraReader]:
-    """Open all three trained MolmoAct2 views, or none of them."""
+) -> dict[str, cameras_mod.AnyCameraReader]:
+    """Open every declared policy view, or none of them."""
     expected = set(rig.camera_names)
     if "top" not in expected:
         raise ConfigurationError("policy inference requires a top camera")
@@ -1153,7 +1162,8 @@ def run_infer(
     # synchronous one.
     if contract.arm_dof != 6 and (reach_actions or reset_start_pose):
         raise ConfigurationError(
-            "SO101 uses bounded execution and its calibrated home; omit --reach-actions/--reset-start-pose"
+            "SO101 uses bounded execution and its calibrated home; "
+            "omit --reach-actions/--reset-start-pose"
         )
     client = policy or MolmoActClient(
         server,
@@ -1170,7 +1180,7 @@ def run_infer(
     # does not pay a channel swap on every HTTP request.
     capture_rig = rig.with_camera_capture(pixel_format="rgb8")
     scene = None
-    camera_readers: dict[str, cameras_mod.CameraReader] = {}
+    camera_readers: dict[str, cameras_mod.AnyCameraReader] = {}
     session = None
     live_arms: list[LiveArm] = []
     prefetcher: ChunkPrefetcher | None = None
@@ -1509,7 +1519,7 @@ def run_rollout(
     )
     client.health()
     capture_rig = rig.with_camera_capture(fps=fps, pixel_format="rgb8")
-    cameras: dict[str, cameras_mod.CameraReader] = {}
+    cameras: dict[str, cameras_mod.AnyCameraReader] = {}
     scene = None
     camera_panel = None
     sink: object | None = None
@@ -1834,7 +1844,7 @@ def run_hitl(
     )
     client.health()
     capture_rig = rig.with_camera_capture(fps=fps, pixel_format="rgb8")
-    cameras: dict[str, cameras_mod.CameraReader] = {}
+    cameras: dict[str, cameras_mod.AnyCameraReader] = {}
     scene = None
     camera_panel = None
     sink: object | None = None
@@ -2563,7 +2573,7 @@ def run_collect(
     if not dry_run:
         record_mod.require_lerobot()
 
-    cameras: dict[str, cameras_mod.CameraReader] = {}
+    cameras: dict[str, cameras_mod.AnyCameraReader] = {}
     try:
         if rig.cameras:
             discovery = cameras_mod.discover(rig.cameras, overrides=camera_overrides)
@@ -2841,6 +2851,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="back up and center firmware encoders before sweeping, like LeRobot calibration",
     )
+
+    policy_frame = sub.add_parser(
+        "so101-policy-frame",
+        help="capture the LeRobot zero/rotated poses to map Karma's SO101 radians onto a "
+        "checkpoint trained on LeRobot degrees",
+    )
+    policy_frame.add_argument("--interface", required=True, help="SO101 USB serial port")
+    policy_frame.add_argument(
+        "--calibration", type=Path, required=True, help="this arm's SO101 calibration JSON"
+    )
+    policy_frame.add_argument("--output", type=Path, required=True, help="new policy frame JSON")
 
     zero = sub.add_parser("zero", help="write the current pose as each servo's firmware zero")
     _add_common(zero)
@@ -3165,7 +3186,7 @@ def main(argv: list[str] | None = None) -> int:
         "--camera",
         action="append",
         metavar="NAME=DEVICE",
-        help="pin one camera to an explicit device (repeatable)",
+        help="pin a camera to a device, or add a UVC webcam by role (e.g. side=/dev/video7)",
     )
     infer.add_argument("--port", type=int, default=8080, help="viser HTTP port")
     infer.add_argument(
@@ -3299,7 +3320,7 @@ def main(argv: list[str] | None = None) -> int:
         "--camera",
         action="append",
         metavar="NAME=DEVICE",
-        help="pin one camera to an explicit device",
+        help="pin a camera to a device, or add a UVC webcam by role on SO101",
     )
     rollout.add_argument("--port", type=int, default=8080, help="viser HTTP port")
     rollout.add_argument(
@@ -3434,7 +3455,7 @@ def main(argv: list[str] | None = None) -> int:
         "--camera",
         action="append",
         metavar="NAME=DEVICE",
-        help="pin one camera to an explicit device",
+        help="pin a camera to a device, or add a UVC webcam by role on SO101",
     )
     hitl.add_argument("--port", type=int, default=8080, help="viser HTTP port")
     hitl.add_argument(
@@ -3523,7 +3544,7 @@ def main(argv: list[str] | None = None) -> int:
         "--camera",
         action="append",
         metavar="NAME=DEVICE",
-        help="pin one camera to an explicit device (repeatable)",
+        help="pin a camera to a device, or add a UVC webcam by role (e.g. side=/dev/video7)",
     )
     rec.add_argument(
         "--repo-id",
@@ -3733,11 +3754,17 @@ def main(argv: list[str] | None = None) -> int:
             action="append",
             default=[],
             metavar="NAME=SERIAL",
-            help="configure top/left_wrist/right_wrist RealSense; adds optional wrists",
+            help="configure top/left_wrist/right_wrist/side RealSense; adds optional views",
         )
     for command_parser in (infer, rollout, hitl):
         command_parser.add_argument(
             "--norm-tag", help="checkpoint normalization statistics key (required for SO101)"
+        )
+        command_parser.add_argument(
+            "--policy-frame",
+            type=Path,
+            help="state/action frame JSON from `karma so101-policy-frame` when the "
+            "checkpoint was not trained on Karma's radians",
         )
     args = parser.parse_args(argv)
     log_path = runlog.setup_run_logging(args.command)
@@ -3748,6 +3775,7 @@ def main(argv: list[str] | None = None) -> int:
         "live": _command_live,
         "teleop": _command_teleop,
         "calibrate-so101": _command_calibrate_so101,
+        "so101-policy-frame": _command_so101_policy_frame,
         "relay": _command_relay,
         "inference": _command_infer,
         "infer": _command_infer,
@@ -3764,6 +3792,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
 
+# Camera roles a policy rig can carry; see inference.MOLMOACT_IMAGE_KEYS for
+# the wire key each one becomes.
+_CAMERA_ROLES = frozenset({"top", "left_wrist", "right_wrist", "side"})
+
+
 def _configured_rig(args):
     import dataclasses
 
@@ -3778,7 +3811,7 @@ def _configured_rig(args):
     serials = _parse_interface_overrides(getattr(args, "camera_serial", []))
     specs = {camera.name: camera for camera in rig.cameras}
     for name, serial in serials.items():
-        if name not in {"top", "left_wrist", "right_wrist"}:
+        if name not in _CAMERA_ROLES:
             raise ConfigurationError(f"unknown camera role {name}")
         if name in specs:
             specs[name] = dataclasses.replace(specs[name], serial=serial)
@@ -3787,10 +3820,35 @@ def _configured_rig(args):
                 name=name,
                 serial=serial,
                 label=name,
-                arm=name.removesuffix("_wrist") if name != "top" else None,
+                arm=name.removesuffix("_wrist") if name.endswith("_wrist") else None,
             )
+    # A plain UVC webcam has no serial, so on a rig whose role is either not
+    # declared or still on the placeholder serial, ``--camera ROLE=/dev/videoN``
+    # is the whole configuration. A role that has a real RealSense serial keeps
+    # ``--camera`` as a device pin, exactly as before.
+    devices = cameras_mod.parse_camera_overrides(getattr(args, "camera", None))
+    for name, device in devices.items():
+        if name not in _CAMERA_ROLES:
+            continue
+        existing = specs.get(name)
+        if existing is not None and (existing.backend == "opencv" or existing.serial != "0"):
+            continue
+        if name in serials:
+            continue
+        specs[name] = cameras_mod.RigCamera(
+            name=name,
+            serial="0",
+            label=existing.label if existing is not None else name,
+            arm=name.removesuffix("_wrist") if name.endswith("_wrist") else None,
+            backend="opencv",
+            device=device,
+        )
+    frame = getattr(args, "policy_frame", None)
     return dataclasses.replace(
-        rig, cameras=tuple(specs.values()), policy_norm_tag=getattr(args, "norm_tag", None)
+        rig,
+        cameras=tuple(specs.values()),
+        policy_norm_tag=getattr(args, "norm_tag", None),
+        policy_frame=None if frame is None else str(frame),
     )
 
 
@@ -3938,6 +3996,16 @@ def _command_relay(args: argparse.Namespace, log_path: Path) -> int:
     )
     print(f"log: {log_path}")
     return status
+
+
+def _command_so101_policy_frame(args: argparse.Namespace, log_path: Path) -> int:
+    from .so101_calibration import run_policy_frame_capture
+
+    try:
+        return run_policy_frame_capture(args.interface, args.calibration, args.output)
+    except KeyboardInterrupt:
+        print("policy frame capture aborted; nothing written", file=sys.stderr)
+        return 130
 
 
 def _command_calibrate_so101(args: argparse.Namespace, log_path: Path) -> int:

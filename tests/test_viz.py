@@ -188,9 +188,11 @@ def test_update_rejects_bad_input(make_viz) -> None:
         instance.update({"not_a_joint": 0.0})
 
 
-def test_fr3_reports_that_it_ships_no_urdf() -> None:
-    with pytest.raises(ConfigurationError, match="ships no URDF"):
-        viz.ArmVisualizer("FR3", port=next(_PORT))
+# Commented out: exercises ARX/FR3/encoder-only hardware removed when Karma was
+# focused on YAM and SO101 (commit 26363d5). Kept for reference.
+# def test_fr3_reports_that_it_ships_no_urdf() -> None:
+#     with pytest.raises(ConfigurationError, match="ships no URDF"):
+#         viz.ArmVisualizer("FR3", port=next(_PORT))
 
 
 def test_unsupported_model_is_rejected() -> None:
@@ -238,7 +240,8 @@ def test_cli_list_reports_every_model(capsys) -> None:
     out = capsys.readouterr().out
     for model in SUPPORTED_MODELS:
         assert model in out
-    assert "no URDF" in out  # FR3
+    # Every packaged model ships a URDF now; the FR3 "no URDF" row went with FR3.
+    assert "no URDF" not in out
 
 
 # --------------------------------------------------------------------------- #

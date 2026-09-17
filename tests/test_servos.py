@@ -10,7 +10,8 @@ import pytest
 from openpi_control import servos
 from openpi_control.servos import buses, dm_can, ft_serial
 
-_ENCOS_BROADCAST_ID = 0x7FF
+# ENCOS (ARX) CAN driver removed with the ARX models; kept for reference.
+# _ENCOS_BROADCAST_ID = 0x7FF
 
 
 class _FakeBus:
@@ -32,10 +33,11 @@ class _FakeBus:
 @pytest.fixture(autouse=True)
 def _no_settle_sleeps(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(dm_can, "_POST_ZERO_SETTLE_S", 0.0)
-    monkeypatch.setattr(encos_can, "_POST_ZERO_SETTLE_S", 0.0)
-    monkeypatch.setattr(encos_can, "_INTER_COMMAND_GAP_S", 0.0)
-    monkeypatch.setattr(encos_can, "_RESPONSE_TIMEOUT_S", 0.01)
-    monkeypatch.setattr(encos_can, "_DISABLE_ACK_TIMEOUT_S", 0.01)
+    # ENCOS (ARX) driver removed with the ARX models; kept for reference.
+    # monkeypatch.setattr(encos_can, "_POST_ZERO_SETTLE_S", 0.0)
+    # monkeypatch.setattr(encos_can, "_INTER_COMMAND_GAP_S", 0.0)
+    # monkeypatch.setattr(encos_can, "_RESPONSE_TIMEOUT_S", 0.01)
+    # monkeypatch.setattr(encos_can, "_DISABLE_ACK_TIMEOUT_S", 0.01)
 
 
 def test_registry_resolves_every_model_json_servo() -> None:

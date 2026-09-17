@@ -132,6 +132,9 @@ class Rig:
     arms: tuple[RigArm, ...] = field(default_factory=tuple)
     cameras: tuple[RigCamera, ...] = field(default_factory=tuple)
     policy_norm_tag: str | None = None
+    #: Path of a ``karma_policy_frame`` JSON, when the checkpoint's state/action
+    #: frame is not Karma's wire (see inference.PolicyFrame).
+    policy_frame: str | None = None
 
     def __post_init__(self) -> None:
         if not self.arms:
@@ -150,13 +153,18 @@ class Rig:
                 )
             camera_names.add(camera.name)
             # Two cameras on one serial means a copy-paste in the rig, and it
-            # would silently record the same view twice under two keys.
-            if camera.serial in camera_serials:
+            # would silently record the same view twice under two keys. A
+            # webcam is identified by its device path instead, so the same
+            # check runs on that.
+            identity = camera.device if camera.backend == "opencv" else camera.serial
+            assert identity is not None
+            if identity in camera_serials:
+                kind = "device" if camera.backend == "opencv" else "serial"
                 raise ConfigurationError(
-                    f"rig {self.name!r} gives serial {camera.serial} to both "
-                    f"{camera_serials[camera.serial]!r} and {camera.name!r}"
+                    f"rig {self.name!r} gives {kind} {identity} to both "
+                    f"{camera_serials[identity]!r} and {camera.name!r}"
                 )
-            camera_serials[camera.serial] = camera.name
+            camera_serials[identity] = camera.name
             if camera.arm is not None and camera.arm not in seen:
                 raise ConfigurationError(
                     f"rig {self.name!r} mounts camera {camera.name!r} on arm "

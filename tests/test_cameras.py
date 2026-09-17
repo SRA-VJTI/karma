@@ -274,3 +274,59 @@ def test_a_redirected_bus_is_taken_literally(tmp_path, monkeypatch) -> None:
     result = discover([camera("top", "000000000001")], by_id_dir=fake_by_id(tmp_path, []))
 
     assert result.missing == {"top": "000000000001"}
+
+
+# --------------------------------------------------------------------------- #
+# OpenCV (plain UVC webcam) backend
+# --------------------------------------------------------------------------- #
+
+
+def webcam(name, device, **kwargs):
+    return RigCamera(name=name, serial="0", label=name, backend="opencv", device=device, **kwargs)
+
+
+def test_a_webcam_needs_a_device_path_and_ignores_the_serial_rule() -> None:
+    # A webcam has no serial to validate, so the placeholder passes; what it
+    # cannot do without is the path, because that is its only identity.
+    assert webcam("top", "/dev/video5").device == "/dev/video5"
+    with pytest.raises(ConfigurationError, match="device path"):
+        RigCamera(name="top", serial="0", label="top", backend="opencv")
+    with pytest.raises(ConfigurationError, match="backend"):
+        RigCamera(name="top", serial="0", label="top", backend="gstreamer")
+
+
+def test_a_webcam_is_present_when_its_device_exists(tmp_path) -> None:
+    node = tmp_path / "video5"
+    node.touch()
+    by_id = fake_by_id(tmp_path, [])
+
+    result = discover([webcam("top", str(node))], by_id_dir=by_id)
+
+    found = result.matched["top"]
+    assert found.device == str(node)
+    assert not found.overridden
+    assert found.spec().backend == "opencv"
+    # It claims no serial, so it must not show up as an unclaimed RealSense.
+    assert result.unclaimed == ()
+
+
+def test_a_webcam_whose_device_is_gone_is_reported_by_path(tmp_path) -> None:
+    result = discover(
+        [webcam("top", str(tmp_path / "video5"))], by_id_dir=fake_by_id(tmp_path, [])
+    )
+
+    assert result.missing == {"top": str(tmp_path / "video5")}
+
+
+def test_a_webcam_override_replaces_the_declared_path(tmp_path) -> None:
+    node = tmp_path / "video7"
+    node.touch()
+
+    result = discover(
+        [webcam("top", str(tmp_path / "video5"))],
+        overrides={"top": str(node)},
+        by_id_dir=fake_by_id(tmp_path, []),
+    )
+
+    assert result.matched["top"].device == str(node)
+    assert result.matched["top"].overridden

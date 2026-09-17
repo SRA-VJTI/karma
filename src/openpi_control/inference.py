@@ -35,7 +35,15 @@ MOLMOACT_STATE_DIM = 14
 MOLMOACT_ACTION_DIM = 14
 MOLMOACT_ARM_DOF = 6
 MOLMOACT_GRIPPER_DOF = 1
-MOLMOACT_CAMERA_NAMES = ("top", "left_wrist", "right_wrist")
+MOLMOACT_CAMERA_NAMES = ("top", "left_wrist", "right_wrist", "side")
+# Rig camera role -> key in the POST body. ``side`` is the SO100/SO101
+# checkpoints' second fixed view; the YAM checkpoint has no such view.
+MOLMOACT_IMAGE_KEYS = {
+    "top": "top_cam",
+    "left_wrist": "left_cam",
+    "right_wrist": "right_cam",
+    "side": "side_cam",
+}
 MOLMOACT_ARM_NAMES = ("left", "right")
 DEFAULT_MOLMOACT_SERVER = "http://127.0.0.1:8202/act"
 
@@ -294,12 +302,53 @@ def served_frames(client: MolmoActClient) -> dict[str, np.ndarray]:
 
 
 @dataclass(frozen=True, slots=True)
+class PolicyFrame:
+    """Per-dimension affine map between Karma's wire and a checkpoint's frame.
+
+    ``policy = wire * scale + offset`` on the way out, inverted on the way
+    back. Karma's wire is calibrated radians and a 0/1 gripper; a checkpoint
+    trained on another stack's state (LeRobot degrees, say) needs its own
+    frame, and that is a property of the checkpoint plus this arm's
+    calibration, hence a file rather than a flag. See
+    ``karma so101-policy-frame``.
+    """
+
+    scale: tuple[float, ...]
+    offset: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        if len(self.scale) != len(self.offset) or not self.scale:
+            raise ConfigurationError("policy frame scale and offset must have the same length")
+        if any(value == 0 for value in self.scale):
+            raise ConfigurationError("policy frame scale must be non-zero")
+
+    def for_dimension(self, dimension: int) -> PolicyFrame:
+        """Tile a one-arm frame across every arm of a wider contract."""
+        width = len(self.scale)
+        if width == dimension:
+            return self
+        if dimension % width:
+            raise ConfigurationError(
+                f"policy frame has {width} entries; the contract needs {dimension}"
+            )
+        reps = dimension // width
+        return PolicyFrame(self.scale * reps, self.offset * reps)
+
+    def to_policy(self, wire: np.ndarray) -> np.ndarray:
+        return np.asarray(wire, dtype=np.float64) * self.scale + self.offset
+
+    def from_policy(self, policy: np.ndarray) -> np.ndarray:
+        return (np.asarray(policy, dtype=np.float64) - self.offset) / self.scale
+
+
+@dataclass(frozen=True, slots=True)
 class PolicyContract:
     arms: tuple[str, ...] = ("left", "right")
     arm_dof: int = 6
     cameras: tuple[str, ...] = ("top", "left_wrist", "right_wrist")
     norm_tag: str = MOLMOACT_NORM_TAG
     gripper_open: float = 1.0
+    frame: PolicyFrame | None = None
 
     @property
     def dimension(self):
@@ -314,12 +363,20 @@ class PolicyContract:
         tag = getattr(rig, "policy_norm_tag", None)
         if tag is None and dof == 5:
             raise ConfigurationError("SO101 policy requires --norm-tag from its trained checkpoint")
+        frame_path = getattr(rig, "policy_frame", None)
+        frame = None
+        if frame_path is not None:
+            from .so101_calibration import load_policy_frame
+
+            scale, offset = load_policy_frame(frame_path)
+            frame = PolicyFrame(scale, offset).for_dimension(len(rig.names) * (dof + 1))
         return cls(
             tuple(rig.names),
             dof,
             tuple(rig.camera_names),
             tag or MOLMOACT_NORM_TAG,
             1.0 if dof == 6 else 0.0,
+            frame,
         )
 
 
@@ -335,6 +392,7 @@ class BimanualObservation:
     right_cam: np.ndarray
     state: np.ndarray
     contract: PolicyContract = DEFAULT_CONTRACT
+    side_cam: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         state = np.asarray(self.state, dtype=np.float32).reshape(-1)
@@ -458,21 +516,20 @@ class MolmoActClient:
             "top": observation.top_cam,
             "left_wrist": observation.left_cam,
             "right_wrist": observation.right_cam,
+            "side": observation.side_cam,
         }
         wire_frames = {
             name: encode_frame(available[name], jpeg_quality=quality)
             for name in self.contract.cameras
         }
         self.last_wire_frames = wire_frames
+        state = np.asarray(observation.state, dtype=np.float64)
+        if self.contract.frame is not None:
+            state = self.contract.frame.to_policy(state)
         payload = {
-            **{
-                {"top": "top_cam", "left_wrist": "left_cam", "right_wrist": "right_cam"}[
-                    name
-                ]: frame
-                for name, frame in wire_frames.items()
-            },
+            **{MOLMOACT_IMAGE_KEYS[name]: frame for name, frame in wire_frames.items()},
             "instruction": instruction,
-            "state": np.asarray(observation.state, dtype=np.float32),
+            "state": state.astype(np.float32),
             "timestamp": time.time(),
             "num_steps": steps,
             "normalization_tag": self.contract.norm_tag,
@@ -513,10 +570,13 @@ class MolmoActClient:
             or actions.shape[0] == 0
         ):
             raise InferenceError(
-                f"MolmoAct actions must have shape (N, {self.contract.dimension}), got {actions.shape}"
+                f"MolmoAct actions must have shape (N, {self.contract.dimension}), "
+                f"got {actions.shape}"
             )
         if not np.all(np.isfinite(actions)):
             raise InferenceError("MolmoAct actions contain non-finite values")
+        if self.contract.frame is not None:
+            actions = self.contract.frame.from_policy(actions)
         gpu_s = float(result.get("dt_ms") or 0.0) / 1000.0 if isinstance(result, dict) else 0.0
         self.last_latency = {
             "round_trip_s": round_trip_s,
@@ -724,6 +784,7 @@ def build_observation(
         right_cam=frames.get("right_wrist"),
         state=np.asarray(measured_vector(states, contract), dtype=np.float32),
         contract=contract,
+        side_cam=frames.get("side"),
     )
 
 

@@ -2,8 +2,9 @@
 
 The `so101` rig drives one SO101 follower with the **right Quest controller**.
 `so101_bimanual` drives two followers with their matching controllers. Both use
-the existing native FeeTech driver and `E_SO101` gripper; no leader arm or i2rt
-checkout is needed. Inference, rollout, HITL, and collection remain separate work.
+the native FeeTech driver and `E_SO101` gripper; no leader arm is needed. The
+same calibration profile serves teleop, recording, inference, rollout and HITL;
+see the [README](../README.md#2-so100--so101) for those commands.
 
 ## Setup
 
@@ -34,8 +35,10 @@ the IK target is its `end_link` frame. Native joint readings and commands are
 **radians**, ordered shoulder pan, shoulder lift, elbow flex, wrist flex, wrist
 roll. The gripper is separate. This runtime uses native servo firmware zeros
 and instance configuration; it does not import LeRobot calibration JSON or
-normalized joint observations. Verify your arm's measured zero pose and joint
-directions agree with the packaged model before Cartesian teleoperation.
+normalized joint observations. (A checkpoint trained on LeRobot data is bridged
+at the policy boundary instead — see [policy frames](inference.md#policy-frames).)
+Verify your arm's measured zero pose and joint directions agree with the
+packaged model before Cartesian teleoperation.
 Do not run `openpi zero` at an arbitrary pose: it writes the current pose as the
 servo zero. See [zeroing instructions](cli.md#zero) if calibration is needed.
 
@@ -166,6 +169,17 @@ sudo udevadm control --reload-rules
 Unplug and reconnect the Quest, then run `adb devices -l`. If it now reports
 `unauthorized`, put on the headset and accept the USB debugging prompt. Once
 it reports `device`, rerun teleop; the command creates `adb reverse` itself.
+
+## Policy frame for LeRobot-trained checkpoints (work in progress)
+
+The calibration profile defines Karma's joint frame: radians, zero at each
+joint's mid-travel. The public `MolmoAct2-SO100_101` checkpoint expects
+LeRobot v1 degrees instead. `karma so101-policy-frame` captures LeRobot's zero
+and rotated poses with torque off and writes a per-joint map that
+`--policy-frame` applies on the policy commands. It reuses this profile, so
+recalibrating the arm means recapturing the frame. The capture is hand-held and
+still being made robust; verify the mapped rest pose before energizing, as
+described in [inference](inference.md#policy-frames).
 
 ## Starting pose and calibration
 

@@ -94,7 +94,7 @@ def test_the_teaching_handle_encoder_is_read_only() -> None:
 
 
 def test_plan_is_ordered_by_joint_id() -> None:
-    for model in ("Yam", "ARX_X5", "Trossen_wai_ctrl"):
+    for model in ("Yam", "SO101"):
         ids = [entry.joint_id for entry in cli.build_plan(model)]
         assert ids == sorted(ids), model
 
@@ -115,11 +115,13 @@ def test_a_servo_without_a_model_is_rejected(tmp_path) -> None:
         cli.servo_entries(catalog, "arm")
 
 
-def test_a_read_only_arm_has_no_bus_to_open() -> None:
-    """ARX_ENC is a leader-only encoder arm: nothing to zero."""
-    plan = cli.build_plan("ARX_ENC")
-    assert all(entry.read_only for entry in plan)
-    assert cli.plan_port_type(plan) is None
+# Commented out: exercises ARX/FR3/encoder-only hardware removed when Karma was
+# focused on YAM and SO101 (commit 26363d5). Kept for reference.
+# def test_a_read_only_arm_has_no_bus_to_open() -> None:
+#     """ARX_ENC is a leader-only encoder arm: nothing to zero."""
+#     plan = cli.build_plan("ARX_ENC")
+#     assert all(entry.read_only for entry in plan)
+#     assert cli.plan_port_type(plan) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -165,16 +167,20 @@ def test_doctor_flags_an_uncached_mesh_directory(no_mesh_cache) -> None:
     assert "--fetch-meshes" in meshes_check.detail
 
 
-def test_doctor_warns_when_a_model_ships_no_urdf(no_mesh_cache) -> None:
-    results = cli.run_doctor("FR3", "192.168.1.10")
-    assert _by_name(results, "urdf").status == cli._WARN
+# Commented out: exercises ARX/FR3/encoder-only hardware removed when Karma was
+# focused on YAM and SO101 (commit 26363d5). Kept for reference.
+# def test_doctor_warns_when_a_model_ships_no_urdf(no_mesh_cache) -> None:
+#     results = cli.run_doctor("FR3", "192.168.1.10")
+#     assert _by_name(results, "urdf").status == cli._WARN
 
 
-def test_doctor_reports_a_read_only_arm_has_nothing_to_zero(no_mesh_cache) -> None:
-    results = cli.run_doctor("ARX_ENC", "can0")
-    bus_type = _by_name(results, "bus type")
-    assert bus_type.status == cli._WARN
-    assert "nothing to zero" in bus_type.detail
+# Commented out: exercises ARX/FR3/encoder-only hardware removed when Karma was
+# focused on YAM and SO101 (commit 26363d5). Kept for reference.
+# def test_doctor_reports_a_read_only_arm_has_nothing_to_zero(no_mesh_cache) -> None:
+#     results = cli.run_doctor("ARX_ENC", "can0")
+#     bus_type = _by_name(results, "bus type")
+#     assert bus_type.status == cli._WARN
+#     assert "nothing to zero" in bus_type.detail
 
 
 def test_doctor_exit_code_is_nonzero_only_on_failure(capsys, no_mesh_cache) -> None:
@@ -215,11 +221,13 @@ def test_zero_reports_an_unacknowledged_servo(fake_bus) -> None:
     assert all(error == "no acknowledgement" for _, error in outcomes)
 
 
-def test_zero_on_a_read_only_arm_writes_nothing(fake_bus) -> None:
-    bus = fake_bus()
-    outcomes = cli.zero_arm(cli.build_plan("ARX_ENC"), buses.PORT_TYPE_CAN, "can0")
-    assert outcomes == []
-    assert bus.sent == []
+# Commented out: exercises ARX/FR3/encoder-only hardware removed when Karma was
+# focused on YAM and SO101 (commit 26363d5). Kept for reference.
+# def test_zero_on_a_read_only_arm_writes_nothing(fake_bus) -> None:
+#     bus = fake_bus()
+#     outcomes = cli.zero_arm(cli.build_plan("ARX_ENC"), buses.PORT_TYPE_CAN, "can0")
+#     assert outcomes == []
+#     assert bus.sent == []
 
 
 def test_dry_run_touches_no_bus(monkeypatch, capsys) -> None:

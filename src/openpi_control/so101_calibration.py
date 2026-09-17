@@ -55,11 +55,17 @@ def _open_bus(interface):
         raise ConfigurationError(f"cannot use calibration serial port {interface}: {err}") from err
 
 
-def _read(bus, servo_id, address, length=2):
-    value = ft_serial.ft_read(bus, servo_id, address, length)
-    if value is None:
-        raise ConfigurationError(f"cannot read servo {servo_id} register {address}")
-    return int.from_bytes(value, "little")
+def _read(bus, servo_id, address, length=2, *, attempts=5):
+    # A single dropped reply on a shared half-duplex bus is routine, not a
+    # fault; only a servo that stays silent is worth aborting a wizard over.
+    for attempt in range(attempts):
+        value = ft_serial.ft_read(bus, servo_id, address, length)
+        if value is not None:
+            return int.from_bytes(value, "little")
+        time.sleep(0.02 * (attempt + 1))
+    raise ConfigurationError(
+        f"cannot read servo {servo_id} register {address} after {attempts} attempts"
+    )
 
 
 def _positions(bus):
@@ -277,6 +283,126 @@ def center_encoders(bus, output):
                 f"Do not run teleop with an older profile. Backup: {backup}"
             )
     return [_read(bus, i, 31) for i in range(1, 7)]
+
+
+POLICY_FRAME_FORMAT = "karma_policy_frame.v1"
+_LEROBOT_QUARTER_TURN_STEPS = 1024
+_DEG_PER_STEP = 360.0 / 4096
+
+
+def build_policy_frame(profile, zero_steps, rotated_steps):
+    """Affine map from Karma's SO101 policy wire to the LeRobot v1 degree frame.
+
+    The SO100/SO101 MolmoAct2 checkpoints were trained on LeRobot v1 datasets:
+    joints in degrees, zero at the "zero position" (arm straight out
+    horizontally, gripper up and closed), each joint +90 at the "rotated
+    position"; the gripper is 0 closed and 100 at its rotated (open) position.
+    Karma's wire is calibrated radians with a mid-range zero and the gripper as
+    0=open/1=closed. Both are affine in raw encoder steps, so two captured
+    poses and the calibration profile fix ``policy = scale * wire + offset``
+    per joint exactly as LeRobot's own calibration would have.
+    """
+    zero = np.asarray(zero_steps, dtype=float)
+    rotated = np.asarray(rotated_steps, dtype=float)
+    if zero.shape != (6,) or rotated.shape != (6,):
+        raise ConfigurationError("policy frame needs six positions per captured pose")
+    if np.any(np.abs(rotated - zero) < 200):
+        still = [n for n, z, r in zip(NAMES, zero, rotated, strict=True) if abs(r - z) < 200]
+        raise ConfigurationError(
+            "these joints barely moved between the zero and rotated poses: "
+            + ", ".join(still)
+            + "; every joint (and the gripper) must turn about a quarter turn"
+        )
+    scale, offset = [], []
+    for i in range(6):
+        if i < 5:
+            servo = profile["arm_instance"]["joints"][i]["servos"][0]
+            # Karma: rad = ((steps - 2048) * TICK - zero_pos) * dir_invert
+            k_a = servo["dir_invert"] * TICK
+            k_b = (-2048 * TICK - servo["zero_pos"]) * servo["dir_invert"]
+            # LeRobot: drive so that rotated - zero is +90 deg; homing so that
+            # the rotated pose reads exactly 90 (as run_arm_manual_calibration).
+            drive = 1.0 if rotated[i] > zero[i] else -1.0
+            l_a = drive * _DEG_PER_STEP
+            l_b = 90.0 - l_a * rotated[i]
+        else:
+            motor = profile["motors"]["gripper"]
+            span = motor["range_max"] - motor["range_min"]
+            closed = motor["closed_steps"]
+            direction = 1.0 if closed == motor["range_min"] else -1.0
+            # Karma wire gripper: 0 open .. 1 closed, over the calibrated travel.
+            k_a = -direction / span
+            k_b = 1.0 + direction * closed / span
+            # LeRobot LINEAR: 0 at the zero (closed) pose, 100 at the rotated one.
+            l_a = 100.0 / (rotated[i] - zero[i])
+            l_b = -l_a * zero[i]
+        # Eliminate steps: policy = l_a/k_a * wire + (l_b - l_a/k_a * k_b).
+        a = l_a / k_a
+        scale.append(float(a))
+        offset.append(float(l_b - a * k_b))
+    return {
+        "format": POLICY_FRAME_FORMAT,
+        "model": "SO101",
+        "target": "lerobot_v1_degrees",
+        "names": list(NAMES),
+        "scale": scale,
+        "offset": offset,
+        "zero_steps": zero.tolist(),
+        "rotated_steps": rotated.tolist(),
+    }
+
+
+def run_policy_frame_capture(interface, calibration, output):
+    output = Path(output).expanduser().resolve()
+    if output.exists():
+        raise ConfigurationError(f"{output} already exists; choose a new output to preserve it")
+    profile = load_profile(calibration)
+    print("SO101 policy frame: maps Karma's calibrated radians onto the LeRobot v1")
+    print("degree frame the SO100/SO101 MolmoAct2 checkpoints were trained in.")
+    print("Stop all robot programs. Support the arm; torque will be disabled.")
+    print("Reference photos: https://github.com/huggingface/lerobot/tree/"
+          "42bf1e8b9df3d38b3898b24e46b5e0386910c466/media/so100 (follower_zero, follower_rotated)")
+    input("Press Enter when the arm is supported and ready: ")
+    with _open_bus(interface) as bus:
+        _positions(bus)
+        for i in range(1, 7):
+            if not ft_serial.torque_enable(bus, i, False) or _read(bus, i, 40, 1) != 0:
+                raise ConfigurationError(f"could not disable torque on servo {i}")
+        print("Torque off.")
+        print("ZERO pose: whole arm straight out horizontally from the base, forearm in")
+        print("line with the upper arm, wrist straight, gripper jaws pointing UP and CLOSED,")
+        print("wrist roll and base pan centred. Hold it steady.")
+        input("Press Enter to capture the zero pose: ")
+        zero = _stable_positions(bus)
+        print("ROTATED pose: turn every joint a quarter turn from zero, as in the photo:")
+        print("pan 90 deg to the left (seen from above), upper arm straight UP, forearm")
+        print("horizontal forward, gripper pointing DOWN, wrist roll 90 deg, jaws OPEN.")
+        input("Press Enter to capture the rotated pose: ")
+        rotated = _stable_positions(bus)
+    frame = build_policy_frame(profile, zero, rotated)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(frame, indent=2) + "\n")
+    print(f"wrote {output}")
+    for name, a, b in zip(NAMES, frame["scale"], frame["offset"], strict=True):
+        print(f"  {name:<14} policy = {a:+.3f} * wire {b:+.2f}")
+    print("Pass it to inference/rollout/hitl with --policy-frame.")
+    return 0
+
+
+def load_policy_frame(path):
+    try:
+        data = json.loads(Path(path).read_text())
+        if data["format"] != POLICY_FRAME_FORMAT:
+            raise ValueError("unsupported policy frame format")
+        scale = [float(v) for v in data["scale"]]
+        offset = [float(v) for v in data["offset"]]
+        if len(scale) != 6 or len(offset) != 6 or any(v == 0 for v in scale):
+            raise ValueError("expected six non-zero scales and six offsets")
+        if not all(math.isfinite(v) for v in scale + offset):
+            raise ValueError("non-finite values")
+    except (OSError, ValueError, KeyError, TypeError) as err:
+        raise ConfigurationError(f"invalid policy frame {path}: {err}") from err
+    return tuple(scale), tuple(offset)
 
 
 def run_calibration(interface, output, *, center=False):

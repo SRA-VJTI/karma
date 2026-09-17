@@ -6,7 +6,8 @@ reboot and replug, but nothing in the path says which physical camera plays
 which role — that is a site fact tied to the camera's serial number.
 
 This module owns that mapping. No physical camera identities are committed.
-Point the ``CAM_MAP`` env var at an ignored local JSON file of the same ``{"<serial>": "<role>"}`` shape.
+Point the ``CAM_MAP`` env var at an ignored local JSON file of the same
+``{"<serial>": "<role>"}`` shape.
 
 Discovery is pure filesystem enumeration (glob ``/dev/v4l/by-id``) + a serial
 lookup, so it has no dependency on ``pyrealsense2`` or ``v4l2-ctl`` and works

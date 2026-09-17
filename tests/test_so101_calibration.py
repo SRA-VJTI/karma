@@ -291,3 +291,120 @@ def test_gripper_capture_ignores_arm_motion_and_retries_gripper_motion(monkeypat
     monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt))
     assert cal._stable_positions(None, gripper_only=True)[5] == 1001
     assert len(prompts) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Policy frame: Karma wire <-> LeRobot v1 degrees
+# --------------------------------------------------------------------------- #
+
+
+def _lerobot_v1(steps, zero, rotated):
+    """LeRobot v1 feetech calibration applied to a raw pose (DEGREE + LINEAR)."""
+    steps, zero, rotated = (np.asarray(v, dtype=float) for v in (steps, zero, rotated))
+    drive = np.where(rotated[:5] < zero[:5], -1.0, 1.0)
+    homing = 1024.0 - drive * rotated[:5]
+    joints = (drive * steps[:5] + homing) * 360.0 / 4096
+    gripper = (steps[5] - zero[5]) / (rotated[5] - zero[5]) * 100.0
+    return np.r_[joints, gripper]
+
+
+def _karma_wire(steps, profile):
+    steps = np.asarray(steps, dtype=float)
+    wire = []
+    for i, joint in enumerate(profile["arm_instance"]["joints"]):
+        servo = joint["servos"][0]
+        wire.append(((steps[i] - 2048) * TICK - servo["zero_pos"]) * servo["dir_invert"])
+    motor = profile["motors"]["gripper"]
+    span = motor["range_max"] - motor["range_min"]
+    opened = abs(steps[5] - motor["closed_steps"]) / span  # native 1 = open
+    wire.append(1.0 - opened)  # policy wire 0 = open
+    return np.asarray(wire)
+
+
+@pytest.mark.parametrize("reversed_gripper", [False, True])
+@pytest.mark.parametrize("flip_joint", [None, 1, 4])
+def test_policy_frame_matches_lerobot_for_any_pose(reversed_gripper, flip_joint):
+    from openpi_control.inference import PolicyFrame
+    from openpi_control.so101_calibration import build_policy_frame
+
+    low, high, home = samples()
+    closed = high[5] if reversed_gripper else low[5]
+    profile = build_profile(low, high, home, [0] * 6, gripper_closed=closed)
+    # Zero pose somewhere inside travel; rotated a quarter turn away, in a
+    # direction that may or may not agree with Karma's own sign.
+    zero = np.r_[(low[:5] + high[:5]) / 2 - 300.0, closed]
+    step = np.full(5, 1024.0)
+    if flip_joint is not None:
+        zero[flip_joint] += 600.0
+        step[flip_joint] = -1024.0
+    rotated = np.r_[zero[:5] + step, high[5] if not reversed_gripper else low[5]]
+
+    frame_json = build_policy_frame(profile, zero, rotated)
+    frame = PolicyFrame(tuple(frame_json["scale"]), tuple(frame_json["offset"]))
+
+    rng = np.random.default_rng(0)
+    for _ in range(20):
+        pose = rng.uniform(low, high)
+        expected = _lerobot_v1(pose, zero, rotated)
+        got = frame.to_policy(_karma_wire(pose, profile))
+        np.testing.assert_allclose(got, expected, atol=1e-9)
+        np.testing.assert_allclose(frame.from_policy(got), _karma_wire(pose, profile), atol=1e-12)
+    # The captured poses land where LeRobot defines them.
+    np.testing.assert_allclose(frame.to_policy(_karma_wire(rotated, profile))[:5], 90.0, atol=1e-9)
+    np.testing.assert_allclose(frame.to_policy(_karma_wire(zero, profile))[5], 0.0, atol=1e-9)
+    np.testing.assert_allclose(frame.to_policy(_karma_wire(rotated, profile))[5], 100.0, atol=1e-9)
+
+
+def test_policy_frame_rejects_a_joint_that_did_not_turn():
+    from openpi_control.so101_calibration import build_policy_frame
+
+    low, high, home = samples()
+    profile = build_profile(low, high, home, [0] * 6)
+    zero = np.r_[(low[:5] + high[:5]) / 2, low[5]]
+    rotated = zero.copy()
+    rotated[:4] += 1024
+    rotated[5] = high[5]
+    with pytest.raises(ConfigurationError, match="wrist_roll"):
+        build_policy_frame(profile, zero, rotated)
+
+
+def test_policy_frame_travels_through_the_client(tmp_path, monkeypatch):
+    import dataclasses
+    from types import SimpleNamespace
+
+    from openpi_control import inference
+    from openpi_control.so101_calibration import build_policy_frame
+
+    low, high, home = samples()
+    profile = build_profile(low, high, home, [0] * 6)
+    zero = np.r_[(low[:5] + high[:5]) / 2, low[5]]
+    rotated = np.r_[zero[:5] + 1024, high[5]]
+    path = tmp_path / "frame.json"
+    path.write_text(json.dumps(build_policy_frame(profile, zero, rotated)))
+
+    rig = dataclasses.replace(resolve_rig("so101"), policy_norm_tag="t", policy_frame=str(path))
+    contract = inference.PolicyContract.from_rig(rig)
+    assert contract.frame is not None and len(contract.frame.scale) == 6
+
+    wire_state = np.array([0.1, -0.2, 0.3, 0.0, 0.5, 0.25])
+    seen = {}
+
+    class Session:
+        def post(self, *a, **kw):
+            import json_numpy
+
+            seen.update(json_numpy.loads(kw["data"]))
+            # Echo the state back as a one-row chunk: the client must undo the frame.
+            return SimpleNamespace(
+                status_code=200,
+                text=json_numpy.dumps({"actions": np.asarray(seen["state"])[None, :]}),
+            )
+
+    frame = np.zeros((2, 3, 3), dtype=np.uint8)
+    obs = inference.BimanualObservation(
+        top_cam=frame, left_cam=None, right_cam=None, state=wire_state, contract=contract
+    )
+    client = inference.MolmoActClient(contract=contract, session=Session(), jpeg_quality=0)
+    actions = client.infer(obs, "pick")
+    np.testing.assert_allclose(seen["state"], contract.frame.to_policy(wire_state), rtol=1e-6)
+    np.testing.assert_allclose(actions[0], wire_state, atol=1e-5)

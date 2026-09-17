@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from test_inference import _Reader, _state
 
+from openpi_control import cameras as cameras_mod
 from openpi_control import cli, inference
 from openpi_control.inference_record import InferenceRolloutSource
 from openpi_control.rigs import resolve_rig
@@ -116,3 +117,106 @@ def test_policy_cli_carries_so101_camera_and_norm(command, monkeypatch):
     assert seen[0].camera_names == ("top",)
     assert seen[0].cameras[0].serial == "123456"
     assert seen[0].policy_norm_tag == "trained"
+
+
+def test_policy_cli_turns_camera_paths_into_webcams_on_so101(monkeypatch, tmp_path):
+    # SO101 ships a placeholder serial, so `--camera ROLE=/dev/videoN` with no
+    # `--camera-serial` is a webcam declaration, not a RealSense device pin.
+    seen = []
+    monkeypatch.setattr(cli, "run_infer", lambda rig, **kw: seen.append(rig) or 0)
+    top, side = tmp_path / "video5", tmp_path / "video7"
+    argv = [
+        "inference",
+        "--rig",
+        "so101",
+        "--norm-tag",
+        "trained",
+        "--camera",
+        f"top={top}",
+        "--camera",
+        f"right_wrist={side}",
+        "--skip-preflight",
+        "--instruction",
+        "pick",
+    ]
+    assert cli.main(argv) == 0
+    rig = seen[0]
+    assert rig.camera_names == ("top", "right_wrist")
+    assert [c.backend for c in rig.cameras] == ["opencv", "opencv"]
+    assert [c.device for c in rig.cameras] == [str(top), str(side)]
+    assert rig.cameras[1].arm == "right"
+
+
+def test_policy_cli_keeps_camera_as_a_realsense_pin_when_a_serial_is_given(monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(cli, "run_infer", lambda rig, **kw: seen.append(rig) or 0)
+    argv = [
+        "inference",
+        "--rig",
+        "so101",
+        "--norm-tag",
+        "trained",
+        "--camera-serial",
+        "top=123456",
+        "--camera",
+        f"top={tmp_path / 'video4'}",
+        "--skip-preflight",
+        "--instruction",
+        "pick",
+    ]
+    assert cli.main(argv) == 0
+    assert seen[0].cameras[0].backend == "realsense"
+    assert seen[0].cameras[0].serial == "123456"
+
+
+def test_so101_side_view_goes_on_the_wire_as_side_cam():
+    # The SO100/SO101 checkpoints take a fixed second view named ``side``; it
+    # must reach the server as ``side_cam``, not disguised as a wrist.
+    rig = resolve_rig("so101")
+    rig = dataclasses.replace(
+        rig,
+        policy_norm_tag="test_so101",
+        cameras=rig.cameras
+        + (
+            cameras_mod.RigCamera(
+                name="side", serial="0", label="side", backend="opencv", device="/dev/video7"
+            ),
+        ),
+    )
+    contract = inference.PolicyContract.from_rig(rig)
+    assert contract.cameras == ("top", "side")
+    states = states_for(contract)
+    arms = {name: SimpleNamespace(latest_state=state) for name, state in states.items()}
+    frame = np.zeros((2, 3, 3), dtype=np.uint8)
+    readers = {"top": _Reader(frame), "side": _Reader(frame)}
+    observation = inference.build_observation(arms, readers, contract=contract)
+    assert observation.side_cam is not None
+
+    seen = {}
+
+    class Session:
+        def post(self, *a, **kw):
+            import json_numpy
+
+            seen.update(json_numpy.loads(kw["data"]))
+            return SimpleNamespace(
+                status_code=200, text=json_numpy.dumps({"actions": np.zeros((2, 6))})
+            )
+
+    client = inference.MolmoActClient(contract=contract, session=Session(), jpeg_quality=0)
+    client.infer(observation, "pick")
+    assert "top_cam" in seen and "side_cam" in seen
+    assert "right_cam" not in seen
+
+
+def test_policy_cli_accepts_a_side_webcam(monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(cli, "run_infer", lambda rig, **kw: seen.append(rig) or 0)
+    argv = [
+        "inference", "--rig", "so101", "--norm-tag", "trained",
+        "--camera", f"top={tmp_path / 'video5'}", "--camera", f"side={tmp_path / 'video7'}",
+        "--skip-preflight", "--instruction", "pick",
+    ]  # fmt: skip
+    assert cli.main(argv) == 0
+    assert seen[0].camera_names == ("top", "side")
+    assert seen[0].cameras[1].arm is None

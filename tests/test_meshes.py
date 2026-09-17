@@ -70,9 +70,11 @@ def test_yam_mesh_names_come_from_the_packaged_urdf() -> None:
     assert all("/" not in name for name in names)
 
 
-def test_mesh_names_for_a_model_without_a_urdf_are_rejected() -> None:
-    with pytest.raises(ConfigurationError, match="ships no URDF"):
-        meshes.urdf_mesh_names("FR3")
+# Commented out: exercises ARX/FR3/encoder-only hardware removed when Karma was
+# focused on YAM and SO101 (commit 26363d5). Kept for reference.
+# def test_mesh_names_for_a_model_without_a_urdf_are_rejected() -> None:
+#     with pytest.raises(ConfigurationError, match="ships no URDF"):
+#         meshes.urdf_mesh_names("FR3")
 
 
 def test_unknown_model_has_no_mesh_source(no_network) -> None:

@@ -63,43 +63,49 @@ def test_update_rejects_missing_link() -> None:
         update_link_inertial(_SAMPLE_URDF, "nonexistent_link", _MASS_DATA)
 
 
-def test_arx_x5_merge_replaces_baked_in_gripper_mass_exactly_once() -> None:
-    # ARX_X5.urdf bakes the 0.581 kg gripper into end_link; the merge must
-    # replace (not add to) it with E_ARX_mass.json so gravity compensation
-    # counts the gripper exactly once.
-    assets = resolve_model_assets("ARX_X5", effector_model="E_ARX")
-    merged_path = prepare_merged_urdf(assets, model="ARX_X5", effector_model="E_ARX")
-
-    merged = merged_path.read_text()
-    assert assets.effector_model_config is not None
-    mass_json = json.loads(
-        assets.effector_model_config.with_name("E_ARX_mass.json").read_text()
-    )
-    assert merged.count(f'<mass value="{mass_json["mass"]:g}"/>') == 1
-    # The base URDF must stay untouched.
-    assert '<mass value="0.581000"/>' in assets.urdf.read_text()
-
-
-def test_merge_without_effector_zeroes_the_end_link_inertia() -> None:
-    assets = resolve_model_assets("ARX_X5")
-    merged_path = prepare_merged_urdf(assets, model="ARX_X5", effector_model=None)
-
-    merged = merged_path.read_text()
-    assert merged_path.name == "ARX_X5__no_effector.urdf"
-    assert '<mass value="0"/>' in merged
-    assert '<mass value="0.581000"/>' not in merged
+# Commented out: exercises ARX/FR3/encoder-only hardware removed when Karma was
+# focused on YAM and SO101 (commit 26363d5). Kept for reference.
+# def test_arx_x5_merge_replaces_baked_in_gripper_mass_exactly_once() -> None:
+#     # ARX_X5.urdf bakes the 0.581 kg gripper into end_link; the merge must
+#     # replace (not add to) it with E_ARX_mass.json so gravity compensation
+#     # counts the gripper exactly once.
+#     assets = resolve_model_assets("ARX_X5", effector_model="E_ARX")
+#     merged_path = prepare_merged_urdf(assets, model="ARX_X5", effector_model="E_ARX")
+#
+#     merged = merged_path.read_text()
+#     assert assets.effector_model_config is not None
+#     mass_json = json.loads(
+#         assets.effector_model_config.with_name("E_ARX_mass.json").read_text()
+#     )
+#     assert merged.count(f'<mass value="{mass_json["mass"]:g}"/>') == 1
+#     # The base URDF must stay untouched.
+#     assert '<mass value="0.581000"/>' in assets.urdf.read_text()
 
 
-def test_merge_is_deterministic_and_reuses_the_existing_file() -> None:
-    assets = resolve_model_assets("ARX_X5", effector_model="E_ARX")
-    first = prepare_merged_urdf(assets, model="ARX_X5", effector_model="E_ARX")
-    first_mtime_ns = first.stat().st_mtime_ns
-    second = prepare_merged_urdf(assets, model="ARX_X5", effector_model="E_ARX")
+# Commented out: exercises ARX/FR3/encoder-only hardware removed when Karma was
+# focused on YAM and SO101 (commit 26363d5). Kept for reference.
+# def test_merge_without_effector_zeroes_the_end_link_inertia() -> None:
+#     assets = resolve_model_assets("ARX_X5")
+#     merged_path = prepare_merged_urdf(assets, model="ARX_X5", effector_model=None)
+#
+#     merged = merged_path.read_text()
+#     assert merged_path.name == "ARX_X5__no_effector.urdf"
+#     assert '<mass value="0"/>' in merged
+#     assert '<mass value="0.581000"/>' not in merged
 
-    assert first == second
-    # Unchanged content must not be rewritten (a rewrite races a sibling node
-    # parsing the same path).
-    assert second.stat().st_mtime_ns == first_mtime_ns
+
+# Commented out: exercises ARX/FR3/encoder-only hardware removed when Karma was
+# focused on YAM and SO101 (commit 26363d5). Kept for reference.
+# def test_merge_is_deterministic_and_reuses_the_existing_file() -> None:
+#     assets = resolve_model_assets("ARX_X5", effector_model="E_ARX")
+#     first = prepare_merged_urdf(assets, model="ARX_X5", effector_model="E_ARX")
+#     first_mtime_ns = first.stat().st_mtime_ns
+#     second = prepare_merged_urdf(assets, model="ARX_X5", effector_model="E_ARX")
+#
+#     assert first == second
+#     # Unchanged content must not be rewritten (a rewrite races a sibling node
+#     # parsing the same path).
+#     assert second.stat().st_mtime_ns == first_mtime_ns
 
 
 def test_yam_merge_replaces_the_massless_flange() -> None:
