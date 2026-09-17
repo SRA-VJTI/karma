@@ -42,6 +42,13 @@ packaged model before Cartesian teleoperation.
 Do not run `openpi zero` at an arbitrary pose: it writes the current pose as the
 servo zero. See [zeroing instructions](cli.md#zero) if calibration is needed.
 
+Optional but worth doing once: fetch the SO101 meshes so the browser view
+(Viser, on every runtime command) draws the real arm instead of a skeleton:
+
+```bash
+uv run karma-viz --fetch-meshes --model SO101
+```
+
 ## Calibrate this arm and record home
 
 Close teleop first, leave the arm powered, and support it. Run:

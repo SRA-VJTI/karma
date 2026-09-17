@@ -93,6 +93,8 @@ Thumbs.db
 # =========================
 *.log
 logs/
+# Visual meshes fetched by `karma-viz --fetch-meshes` (next to logs/)
+meshes/
 
 # =========================
 # Generated data / outputs

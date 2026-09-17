@@ -175,6 +175,16 @@ uv run karma hitl --rig yam_bimanual \
 
 ## 2. SO100 / SO101
 
+### Browser view
+
+Every SO101 command that opens Viser draws the real arm once its meshes are
+cached (otherwise a skeleton and a `visual meshes not cached` warning):
+
+```bash
+uv run karma-viz --fetch-meshes --model SO101
+uv run karma-viz --rig so101          # hardware-free viewer with sliders
+```
+
 ### Calibrate each arm
 
 Every SO101 arm gets its own profile from the calibration wizard (torque off,

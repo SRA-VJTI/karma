@@ -77,10 +77,22 @@ def test_yam_mesh_names_come_from_the_packaged_urdf() -> None:
 #         meshes.urdf_mesh_names("FR3")
 
 
-def test_unknown_model_has_no_mesh_source(no_network) -> None:
+def test_unknown_model_has_no_mesh_source(no_network, monkeypatch) -> None:
+    # Every packaged model has a source now, so stand one without a source in.
+    monkeypatch.delitem(meshes.MESH_SOURCES, "SO101")
     with pytest.raises(ConfigurationError, match="no mesh source is known"):
         meshes.fetch_meshes("SO101")
     assert not no_network, "must fail before touching the network"
+
+
+def test_so101_mesh_names_are_all_published_by_so_arm100() -> None:
+    # The SO101 URDF references its meshes as package://assets/NAME, and the
+    # source serves every NAME from one directory: no alternates needed.
+    source = meshes.MESH_SOURCES["SO101"]
+    names = meshes.urdf_mesh_names("SO101")
+    assert len(names) == 12
+    assert all(source.url_for(name) == f"{source.base_url}/{name}" for name in names)
+    assert "TheRobotStudio/SO-ARM100" in source.base_url and source.revision in source.base_url
 
 
 def test_fetch_writes_every_available_mesh(tmp_path, fake_vendor) -> None:

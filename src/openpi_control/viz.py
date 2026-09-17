@@ -1236,7 +1236,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--fetch-meshes",
         action="store_true",
         help=(
-            "download --model's visual meshes into ~/openpi-data/meshes and exit. "
+            "download --model's visual meshes into meshes/ next to the log directory and exit. "
             "Needs the network once; later runs render the real arm offline."
         ),
     )

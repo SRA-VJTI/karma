@@ -24,12 +24,16 @@ never needs geometry. Fetch the visual meshes once:
 
 ```bash
 uv run karma-viz --fetch-meshes --model Yam
+uv run karma-viz --fetch-meshes --model SO101
 ```
 
-That downloads I2RT's YAM meshes (MIT) into `~/openpi-data/meshes/Yam/`, beside
-the run logs. Every later run finds them automatically and needs no network, so
-the real arm is the default with no flags. Provenance, including the pinned
-upstream revision, is written to `SOURCE.txt` next to the meshes.
+That downloads I2RT's YAM meshes (MIT) into `meshes/Yam/` and The Robot
+Studio's SO-ARM100 meshes (Apache 2.0) into `meshes/SO101/`, next to the run
+logs (`logs/` by default; git-ignored). Every later run finds them automatically
+and needs no network, so the real arm is the default with no flags — for every
+command that opens a browser view: `live`, `teleop`, `inference`, `rollout`,
+`hitl`, `record`. Provenance, including the pinned upstream revision, is
+written to `SOURCE.txt` next to the meshes.
 
 i2rt keeps the wrist geometry with its crank gripper rather than with the arm,
 so `link_6_visual.stl` / `link_6_collision.stl` are not in the assets directory
@@ -71,12 +75,12 @@ axis. It needs no mesh files.
 **`mesh`** draws the URDF's visual geometry via `viser.extras.ViserUrdf`.
 
 The mesh directory is resolved in this order: an explicit `--mesh-dir`, then a
-sibling `assets/` beside the URDF, then `~/openpi-data/meshes/<Model>/` — the
+sibling `assets/` beside the URDF, then `meshes/<Model>/` beside the logs — the
 cache `--fetch-meshes` fills. With none of those, you get the skeleton, which is
 why a fresh checkout renders one.
 
-Only `Yam` has a known upstream mesh source today; other models need
-`--mesh-dir` pointed at meshes you already have.
+Both packaged models, `Yam` and `SO101`, have a pinned upstream mesh source;
+`--mesh-dir` overrides it with meshes you already have.
 
 ## Bimanual and other rigs
 
@@ -86,6 +90,7 @@ hardware-free — the sliders drive the render:
 ```bash
 uv run karma-viz --list-rigs
 uv run karma-viz --rig yam_bimanual
+uv run karma-viz --rig so101            # or so101_bimanual
 ```
 
 `--rig` takes its models from the rig, so it refuses to be combined with
@@ -110,7 +115,7 @@ camera frame. Its pose is the camera-to-midpoint transform from
 same rigid transform. The wrist-camera frames are intentionally not drawn
 until their extrinsics are calibrated.
 
-To mirror two *live* arms rather than sliders, use `openpi-control live` — it
+To mirror two *live* arms rather than sliders, use `karma live` — it
 owns the power-on and power-off that a live view implies. See
 [docs/cli.md](cli.md#live).
 
@@ -183,6 +188,10 @@ order before rendering.
 
 ## Models
 
-`FR3` ships no URDF; its kinematics live in the vendor controller. Pass
-`--urdf` to visualize it. Every other model in `SUPPORTED_MODELS` renders from
-its packaged URDF.
+Both packaged models render from their packaged URDF. `Yam.urdf` is i2rt's
+`yam.urdf` with the wrist link renamed; `SO101.urdf` is SO-ARM100's
+`so101_new_calib.urdf` with the gripper frame renamed to `end_link` and the
+moving jaw removed (the E_SO101 effector models the gripper). Both reference
+their meshes as `package://assets/NAME`, which the viewer resolves from the
+mesh cache. Neither URDF articulates the gripper, so the gripper panel shows
+the commanded and measured gripper as numbers (1.0 = open) beside the render.

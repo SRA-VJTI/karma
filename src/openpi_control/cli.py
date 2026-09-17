@@ -404,7 +404,7 @@ def run_doctor(
             "visual meshes",
             str(cached)
             if cached
-            else f"not cached — openpi-control-viz --fetch-meshes --model {model}",
+            else f"not cached — karma-viz --fetch-meshes --model {model}",
         )
     )
 
