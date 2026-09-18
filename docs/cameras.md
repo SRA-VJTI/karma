@@ -66,6 +66,11 @@ preflight, and the policy commands run the same checks before energizing.
 
 ## Rigs and roles
 
+![Quest view showing the robot workspace with three camera feeds](media/quest-camera-views.jpg)
+
+Example Quest view with the workspace and multiple camera feeds visible together.
+Use probe snapshots to verify the role and framing of each camera in your own setup.
+
 - **YAM** declares `top`, `left_wrist`, `right_wrist`; the checkpoint expects all
   three in that order.
 - **SO101** declares only `top`. Add `side` (the SO100/SO101 checkpoint's second
