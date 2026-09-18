@@ -109,6 +109,10 @@ never overwritten by the wizard.
 
 ## Run
 
+[![Quest controllers driving SO101 arms](media/so101-quest-teleop.jpg)](media/so101-quest-teleop.mp4)
+
+[Watch the SO101 Quest teleoperation clip (10 seconds)](media/so101-quest-teleop.mp4).
+
 With the Quest connected over USB and USB debugging authorized:
 
 ```bash

@@ -1,10 +1,23 @@
-# Karma
+<p align="center">
+  <img src="docs/media/karma-banner.png" alt="Karma" width="960">
+</p>
 
-Karma is the robot-side workstation stack for **bimanual YAM** and **SO100/SO101**
+Karma is the robot control stack for **bimanual YAM** and **SO100/SO101**
 arms: Meta Quest VR teleoperation, MolmoAct2 policy inference, autonomous
 rollout recording, and human-in-the-loop (HITL / DAgger) data collection.
 The Quest relay and WebXR client, the IK, the native motor runtime, the camera
 capture layer and the LeRobot v3 dataset writer all live in this repository.
+
+[![YAM arms in motion with an operator using Quest controllers](docs/media/karma-demo.gif)](https://x.com/k7agar/status/2094818716433465631)
+
+**[Watch the main VR teleoperation demo ↗](https://x.com/k7agar/status/2094818716433465631)**
+
+| SO101 · Quest teleop | SO101 · MolmoAct2 rollout | YAM · Human in the loop |
+| :---: | :---: | :---: |
+| [![Quest controllers driving SO101 arms](docs/media/so101-quest-teleop.gif)](docs/media/so101-quest-teleop.mp4) | [![SO101 placing a blue block in a box](docs/media/so101-molmoact2-rollout.gif)](docs/media/so101-molmoact2-rollout.mp4) | [![Operator with Quest controllers beside the bimanual YAM rig](docs/media/yam-human-in-the-loop.gif)](docs/media/yam-human-in-the-loop.mp4) |
+| [Full video · 10s](docs/media/so101-quest-teleop.mp4) | [Full video · 22s](docs/media/so101-molmoact2-rollout.mp4) | [Full video · 46s](docs/media/yam-human-in-the-loop.mp4) |
+
+Previews loop at 1.25× speed (teleop and YAM) or 1.5× (rollout); full videos play at recorded speed.
 
 Everything runs through one executable, `uv run karma`, with four main workflows:
 

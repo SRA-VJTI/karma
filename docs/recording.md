@@ -19,6 +19,10 @@ Cameras are RealSense (`--camera-serial ROLE=SERIAL`) or USB webcams
 cache. Choose a new dataset ID/root for a new run. Upload is opt-in with
 `--push-to-hub` and optionally `--private`; authenticate with Hugging Face first.
 
+[![SO101 placing a blue block in a box](media/so101-molmoact2-rollout.jpg)](media/so101-molmoact2-rollout.mp4)
+
+[Watch a SO101 MolmoAct2 policy rollout (22 seconds)](media/so101-molmoact2-rollout.mp4).
+
 ## Schema
 
 - `observation.state`: measured arm joints in calibrated radians plus normalized

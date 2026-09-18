@@ -1,5 +1,9 @@
 # HITL / DAgger workflow
 
+[![Operator with Quest controllers beside the bimanual YAM rig](media/yam-human-in-the-loop.jpg)](media/yam-human-in-the-loop.mp4)
+
+[Watch the YAM human-in-the-loop demonstration (46 seconds)](media/yam-human-in-the-loop.mp4).
+
 1. Calibrate each arm and configure the cameras used by the checkpoint.
 2. Collect initial demonstrations with `karma teleop --record`.
 3. Train or fine-tune MolmoAct2 in its training environment with the documented

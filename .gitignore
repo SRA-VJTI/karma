@@ -121,6 +121,7 @@ mlruns/
 *.mov
 *.mkv
 *.webm
+!docs/media/*.mp4
 
 # =========================
 # Temporary files
@@ -149,3 +150,6 @@ MJDATA.TXT
 
 # Calibration profiles and generated instances belong to this physical arm.
 /calibration/
+
+# Raw documentation media; optimized assets belong in docs/media/.
+/media-inbox/
