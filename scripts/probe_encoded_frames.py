@@ -9,7 +9,7 @@ a stderr line in the middle of a fold.
 One inference each way -- encoded and raw -- against synthetic black frames.
 No hardware is touched and nothing is commanded.
 
-    uv run python scripts/probe_encoded_frames.py 192.168.0.107:4090
+    uv run python scripts/probe_encoded_frames.py GPU_HOST:8202
 """
 
 from __future__ import annotations

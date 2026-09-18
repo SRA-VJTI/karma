@@ -374,3 +374,11 @@ def test_a_dagger_session_leaves_the_episode_buttons_alone() -> None:
 
     assert step.event is EpisodeEvent.NONE
     assert step.targets, "it still drives the arms; only the events are suppressed"
+
+
+def test_second_ctrl_c_during_disconnect_does_not_interrupt_native_teardown():
+    class InterruptedTeleoperator(FakeTeleoperator):
+        def disconnect(self):
+            raise KeyboardInterrupt
+
+    QuestTeleopSource(["right"], teleoperator=InterruptedTeleoperator()).close()

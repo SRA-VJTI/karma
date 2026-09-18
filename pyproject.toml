@@ -3,121 +3,39 @@ requires = ["scikit-build-core>=0.10"]
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "openpi-control"
-version = "0.1.5"
-description = "OpenPI native control runtime for YAM, ARX, and FR3 robot arms"
+name = "karma"
+version = "0.2.0"
+description = "YAM and SO101 Quest teleoperation, MolmoAct2 inference and LeRobot v3 DAgger"
 readme = "README.md"
-# Capped below 3.14: trossen-arm is hard-pinned to ==1.10.0 to stay aligned
-# with the C++ libtrossen_arm in scripts/build_deps.sh, and that release
-# only publishes cp311/cp312/cp313 wheels.
-requires-python = ">=3.11,<3.14"
-authors = [{ name = "OpenPI Control maintainers" }]
+requires-python = ">=3.12,<3.14"
 dependencies = [
-  "numpy>=1.26",
-  # Direct CAN access for the servo zeroing registry (openpi_control.servos).
-  "python-can>=4.3",
-  "pyzmq>=25",
-  # Trossen iNerve Ethernet controllers: discovery, EEPROM zeroing, and IP
-  # provisioning (openpi_control.servos.trossen_eth). Pinned to the same
-  # release as the C++ libtrossen_arm in scripts/build_deps.sh so the driver
-  # <-> controller firmware compatibility stays aligned.
-  "trossen-arm==1.10.0",
-  # USB-serial bus-servo maintenance sessions (openpi_control.servos.buses)
-  # for the FeeTech/Dynamixel serial families (e.g. SO-ARM101).
-  "pyserial>=3.5",
+  "numpy>=1.26", "python-can>=4.3", "pyzmq>=25", "pyserial>=3.5",
+  "json-numpy>=1.0", "requests>=2.31", "pillow>=10",
+  "mujoco>=3.2", "websockets>=13", "fastapi>=0.115", "uvicorn[standard]>=0.30",
+  "aiortc>=1.9", "av>=12", "opencv-python-headless>=4.10", "pyrealsense2>=2.55",
+  "torch", "torchvision", "torchcodec",
+  "lerobot[dataset]==0.6.1", "viser>=1.0", "yourdfpy>=0.0.56",
 ]
 
 [project.optional-dependencies]
-dev = [
-  "hypothesis>=6",
-  "pytest>=8",
-  "pytest-cov>=5",
-  "ruff>=0.6",
-]
-# Browser visualization of the packaged models (openpi_control.viz). Kept
-# optional: it pulls trimesh/scipy and is never needed to drive an arm.
-viz = [
-    "viser>=1.0",
-    "yourdfpy>=0.0.56",
-]
-# Reading the cell's RealSense colour streams (openpi_control.cameras).
-# Discovery -- "is the top camera plugged in" -- is stdlib only and needs none
-# of this; capture is what wants the SDK. pyrealsense2 rather than OpenCV's
-# V4L2 path because it is the only one of the two that reaches 30 fps on a
-# D405 (openpi_control.cameras.CameraReader explains the measurement). OpenCV
-# stays for encoding snapshots -- headless, since nothing here opens a window.
-cameras = [
-    "pyrealsense2>=2.55",
-    "opencv-python-headless>=4.10",
-]
-# MolmoAct2's robot-side HTTP client. The GPU model server remains a separate
-# process; this extra only installs what talking to /act needs.
-inference = [
-    # The wire codec: json_numpy is how ndarrays ride a JSON body.
-    "json-numpy>=1.0",
-    # requests, not urllib, because the reference client's keep-alive Session
-    # is part of the runtime being matched -- one TCP connection for every
-    # inference instead of a handshake per call.
-    "requests>=2.31",
-    # Frames go out JPEG-encoded (~25x less payload than raw). Pillow rather
-    # than reusing the `cameras` extra's OpenCV so this extra stays
-    # installable without the RealSense SDK.
-    "pillow>=10",
-]
-# Recording teleop into a LeRobot dataset (openpi_control.record). Split from
-# `cameras` because lerobot drags in torch, which a robot box that only drives
-# arms has no use for.
-lerobot = [
-    "openpi-control[cameras]",
-    # The [dataset] extra is not optional for us: from lerobot 0.6 onwards
-    # importing LeRobotDataset without it raises ImportError for `datasets`,
-    # and LeRobotDataset is the whole point of this extra.
-    #
-    # Marked for 3.12+ because lerobot 0.6 requires it, while this project still
-    # supports 3.11 (trossen-arm publishes cp311 wheels). Without the marker the
-    # resolver fails outright on 3.11 rather than leaving the extra empty, which
-    # would make `uv sync` unusable there even for people who never record.
-    "lerobot[dataset]>=0.6; python_version >= '3.12'",
-]
-# Driving the arms from a Quest headset (openpi_control.teleop_vr). The
-# vendored VR stack includes its WebSocket relay, WebXR page, optional WebRTC
-# camera publisher, and YAM IK, so this extra contains the complete runtime.
-vr = [
-    "mujoco>=3.2",
-    "websockets>=13",
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.30",
-    "aiortc>=1.9",
-    "av>=12",
-    "opencv-python-headless>=4.10",
-]
+dev = ["hypothesis>=6", "pytest>=8", "pytest-cov>=5", "ruff>=0.6"]
+viz = []
+# Compatibility with existing setup commands; runtime extras are now installed by default.
+vr = []
+cameras = []
+inference = []
+lerobot = []
 
-# `uv sync` is an exact sync: it uninstalls whatever is not in the set it was
-# asked for, so `uv sync --extra cameras` used to silently strip the inference
-# and viz extras a live cell had just installed. This group is every extra an
-# operator box actually drives an arm with, and uv installs it on any plain
-# `uv sync` / `uv run`, so no single-extra command can undo the rest of them.
-#
-# A dependency-group rather than another extra on purpose: it is a development
-# and deployment convenience, so it stays out of the published wheel's metadata
-# -- `pip install openpi-control[cameras]` is unaffected by anything here.
-#
-# Collection is a first-class operator command, so LeRobot is part of the cell
-# environment. That makes the documented `uv run openpi collect ...` command
-# self-contained instead of failing after preflight with an extra-install hint.
-# Published wheels keep it optional: only this checkout's default deployment
-# group pulls in the heavier dataset stack.
 [dependency-groups]
-cell = ["openpi-control[dev,viz,cameras,inference,lerobot,vr]"]
+dev = ["karma[dev]"]
 
 [tool.uv]
-default-groups = ["cell"]
+default-groups = []
 
 [project.scripts]
-openpi = "openpi_control.cli:main"
-openpi-control = "openpi_control.cli:main"
-openpi-control-viz = "openpi_control.viz:main"
-vr-teleop-relay = "vr_teleop_kit.relay.server:main"
+karma = "openpi_control.cli:main"
+karma-viz = "openpi_control.viz:main"
+karma-relay = "vr_teleop_kit.relay.server:main"
 
 [tool.scikit-build]
 cmake.version = ">=3.22"
@@ -147,3 +65,15 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+# The robot workstation records datasets and calls a remote GPU model server.
+# CPU wheels avoid installing CUDA libraries solely for LeRobot's dataset API.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+torchcodec = { index = "pytorch-cpu" }

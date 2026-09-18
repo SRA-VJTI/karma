@@ -15,25 +15,8 @@ from .exceptions import ConfigurationError
 
 _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]*$")
 
-SUPPORTED_MODELS = (
-    "ARX_ENC",
-    "ARX_L5",
-    "ARX_X5",
-    "FR3",
-    "SO101",
-    "Trossen_wai_ctrl",
-    "Yam",
-)
-SUPPORTED_EFFECTORS = (
-    "E_ARX",
-    "E_ARX_ENC",
-    "E_SO101",
-    "E_Trossen_ctrl",
-    "E_Yam",
-    "E_Yam_Handle",
-    "E_Yam_Handle_compat",
-    "Robotiq",
-)
+SUPPORTED_MODELS = ("SO101", "Yam")
+SUPPORTED_EFFECTORS = ("E_SO101", "E_Yam", "E_Yam_Handle", "E_Yam_Handle_compat")
 
 
 @dataclass(frozen=True, slots=True)

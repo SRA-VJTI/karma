@@ -88,6 +88,7 @@ from .inference import (
     GripperWatch,
     InferenceError,
     MolmoActClient,
+    PolicyContract,
     ReachingChunkExecutor,
     build_observation,
     command_lag,
@@ -403,7 +404,7 @@ def run_doctor(
             "visual meshes",
             str(cached)
             if cached
-            else f"not cached — openpi-control-viz --fetch-meshes --model {model}",
+            else f"not cached — karma-viz --fetch-meshes --model {model}",
         )
     )
 
@@ -473,9 +474,11 @@ def run_camera_checks(
                 CheckResult(
                     mark,
                     f"camera {camera.name}",
-                    f"serial {camera.serial} not on the bus"
-                    if camera.name not in (overrides or {})
-                    else f"pinned device {(overrides or {})[camera.name]} does not exist",
+                    f"device {result.missing[camera.name]} does not exist"
+                    if camera.backend == "opencv"
+                    else f"pinned device {(overrides or {})[camera.name]} does not exist"
+                    if camera.name in (overrides or {})
+                    else f"serial {camera.serial} not on the bus",
                 )
             )
             continue
@@ -515,6 +518,13 @@ def check_camera_modes(rig: Rig) -> list[CheckResult]:
     results: list[CheckResult] = []
     for camera in rig.cameras:
         label, size = f"mode {camera.name}", f"{camera.width}x{camera.height}"
+        if camera.backend == "opencv":
+            # V4L2 negotiates at open and never refuses, so the honest answer
+            # is what `--probe` measured, not a mode list.
+            results.append(
+                CheckResult(_OK, label, f"{size}@{camera.fps} requested; opencv negotiates at open")
+            )
+            continue
         try:
             modes = cameras_mod.supported_color_modes(camera.serial)
         except ConfigurationError as err:
@@ -572,7 +582,7 @@ def probe_cameras(
             results.append(CheckResult(_WARN, f"probe {camera.name}", "no device; nothing to open"))
             continue
         try:
-            with cameras_mod.CameraReader(found.spec()) as reader:
+            with cameras_mod.open_camera(found.spec()) as reader:
                 frame = reader.wait_for_frame(warmup_s)
                 if frame is None:
                     results.append(
@@ -775,6 +785,10 @@ def power_up(
     """
     from .session import ArmSession
 
+    if backend_factory is None:
+        from .so101_calibration import verify_firmware
+
+        verify_firmware(rig)
     session = ArmSession()
     entries: list[LiveArm] = []
     for rig_arm in rig.arms:
@@ -861,7 +875,7 @@ def power_down(session: ArmSession, live_arms: list[LiveArm], *, park: bool = Tr
 
 def open_preview_cameras(
     rig: Rig, *, overrides: dict[str, str] | None = None
-) -> dict[str, cameras_mod.CameraReader]:
+) -> dict[str, cameras_mod.AnyCameraReader]:
     """Open every camera of ``rig`` that can be opened, and say what was not.
 
     Deliberately not the recorder's all-or-none open: a dataset with a view
@@ -887,11 +901,11 @@ def open_preview_cameras(
         )
         print(f"  camera   {name:<12} not previewing — {why}")
 
-    readers: dict[str, cameras_mod.CameraReader] = {}
+    readers: dict[str, cameras_mod.AnyCameraReader] = {}
     problems: dict[str, list[str]] = {}
     for name, found in discovery.matched.items():
         try:
-            readers[name] = cameras_mod.CameraReader(found.spec())
+            readers[name] = cameras_mod.open_camera(found.spec())
         except (ConfigurationError, OSError) as err:
             problems.setdefault(str(err), []).append(name)
     for message, names in problems.items():
@@ -974,7 +988,7 @@ def run_live(
     # Cameras before the motors, as in ``record``: opening them is what finds
     # out a camera is held by another process, and finding that out with two
     # arms already energized is worse. Unlike ``record`` it is not fatal here.
-    camera_readers: dict[str, cameras_mod.CameraReader] = {}
+    camera_readers: dict[str, cameras_mod.AnyCameraReader] = {}
     if scene is not None and camera_preview and rig.cameras:
         camera_readers = open_preview_cameras(rig, overrides=camera_overrides)
 
@@ -1043,9 +1057,11 @@ def open_inference_cameras(
     *,
     overrides: dict[str, str] | None = None,
     warmup_s: float = _CAMERA_WARMUP_S,
-) -> dict[str, cameras_mod.CameraReader]:
-    """Open all three trained MolmoAct2 views, or none of them."""
-    expected = {"top", "left_wrist", "right_wrist"}
+) -> dict[str, cameras_mod.AnyCameraReader]:
+    """Open every declared policy view, or none of them."""
+    expected = set(rig.camera_names)
+    if "top" not in expected:
+        raise ConfigurationError("policy inference requires a top camera")
     actual = set(rig.camera_names)
     if actual != expected:
         raise ConfigurationError(
@@ -1131,10 +1147,7 @@ def run_infer(
     )
     if not np.isfinite(prefetch_margin_s) or prefetch_margin_s < 0:
         raise ConfigurationError("--prefetch-margin-s must be finite and nonnegative")
-    if tuple(rig.names) != ("left", "right"):
-        raise ConfigurationError(
-            "MolmoAct2 bimanual inference requires the packaged left/right YAM rig"
-        )
+    contract = PolicyContract.from_rig(rig)
     if not instruction.strip():
         raise ConfigurationError("inference instruction must not be empty")
     if control_rate_hz <= 0:
@@ -1147,12 +1160,18 @@ def run_infer(
     # num_steps and the CUDA-graph request live on the client rather than on
     # each call, so a prefetched chunk is asked for exactly the same way as a
     # synchronous one.
+    if contract.arm_dof != 6 and (reach_actions or reset_start_pose):
+        raise ConfigurationError(
+            "SO101 uses bounded execution and its calibrated home; "
+            "omit --reach-actions/--reset-start-pose"
+        )
     client = policy or MolmoActClient(
         server,
         timeout_s=request_timeout_s,
         num_steps=num_steps,
         jpeg_quality=jpeg_quality,
         enable_cuda_graph=enable_cuda_graph,
+        contract=contract,
     )
     client.health()
 
@@ -1161,7 +1180,7 @@ def run_infer(
     # does not pay a channel swap on every HTTP request.
     capture_rig = rig.with_camera_capture(pixel_format="rgb8")
     scene = None
-    camera_readers: dict[str, cameras_mod.CameraReader] = {}
+    camera_readers: dict[str, cameras_mod.AnyCameraReader] = {}
     session = None
     live_arms: list[LiveArm] = []
     prefetcher: ChunkPrefetcher | None = None
@@ -1183,6 +1202,7 @@ def run_infer(
             )
             if reach_actions
             else BoundedChunkExecutor(
+                contract=contract,
                 max_step_rad=max_step_rad,
                 max_effector_step=max_effector_step,
                 carry_targets=carry_targets,
@@ -1294,7 +1314,7 @@ def run_infer(
         while not stop.is_set():
             states = fresh_states()
             try:
-                observation = build_observation(arm_map, camera_readers)
+                observation = build_observation(arm_map, camera_readers, contract=contract)
             except StaleStateError:
                 stop.wait(min(period, 0.02))
                 continue
@@ -1309,7 +1329,7 @@ def run_infer(
             # scaled back into action space to follow it.
             plan = time_scale(actions, speed)
             if scene is not None:
-                scene.update_chunk(split_chunk(actions))
+                scene.update_chunk(split_chunk(actions, PolicyContract.from_rig(rig)))
             if camera_panel is not None:
                 camera_panel.push(served_frames(client))
             latency = getattr(client, "last_latency", None) or {}
@@ -1386,7 +1406,8 @@ def run_infer(
                     if queued_s <= prefetcher.latency_s + prefetch_margin_s:
                         try:
                             prefetcher.submit(
-                                build_observation(arm_map, camera_readers), instruction
+                                build_observation(arm_map, camera_readers, contract=contract),
+                                instruction,
                             )
                         except StaleStateError:
                             pass  # Retry on the next fresh tick.
@@ -1470,8 +1491,7 @@ def run_rollout(
     )
     if not np.isfinite(prefetch_margin_s) or prefetch_margin_s < 0:
         raise ConfigurationError("--prefetch-margin-s must be finite and nonnegative")
-    if tuple(rig.names) != ("left", "right"):
-        raise ConfigurationError("policy rollouts require the packaged bimanual left/right YAM rig")
+    contract = PolicyContract.from_rig(rig)
     if episodes <= 0:
         raise ConfigurationError("--episodes must be positive")
     if episode_seconds <= 0:
@@ -1495,10 +1515,11 @@ def run_rollout(
         num_steps=num_steps,
         jpeg_quality=jpeg_quality,
         enable_cuda_graph=enable_cuda_graph,
+        contract=contract,
     )
     client.health()
     capture_rig = rig.with_camera_capture(fps=fps, pixel_format="rgb8")
-    cameras: dict[str, cameras_mod.CameraReader] = {}
+    cameras: dict[str, cameras_mod.AnyCameraReader] = {}
     scene = None
     camera_panel = None
     sink: object | None = None
@@ -1519,7 +1540,9 @@ def run_rollout(
     try:
         cameras = open_inference_cameras(capture_rig, overrides=camera_overrides)
         shapes = record_mod.camera_shapes(cameras)
-        state_names = record_mod.arm_feature_names(["left", "right"], {"left": 6, "right": 6})
+        state_names = record_mod.arm_feature_names(
+            rig.names, {name: contract.arm_dof for name in rig.names}
+        )
         features = record_mod.build_features(state_names, shapes)
         sink = record_mod.LeRobotSink(
             repo_id=repo_id,
@@ -1565,7 +1588,7 @@ def run_rollout(
 
                 def on_chunk(actions: np.ndarray) -> None:
                     if scene is not None:
-                        scene.update_chunk(split_chunk(actions))
+                        scene.update_chunk(split_chunk(actions, PolicyContract.from_rig(rig)))
                     if camera_panel is not None:
                         camera_panel.push(served_frames(client))
 
@@ -1792,10 +1815,7 @@ def run_hitl(
     )
     if not np.isfinite(prefetch_margin_s) or prefetch_margin_s < 0:
         raise ConfigurationError("--prefetch-margin-s must be finite and nonnegative")
-    if tuple(rig.names) != ("left", "right"):
-        raise ConfigurationError(
-            "DAgger recording requires the packaged bimanual left/right YAM rig"
-        )
+    contract = PolicyContract.from_rig(rig)
     if episodes <= 0:
         raise ConfigurationError("--episodes must be positive")
     if episode_seconds <= 0:
@@ -1820,10 +1840,11 @@ def run_hitl(
         num_steps=num_steps,
         jpeg_quality=jpeg_quality,
         enable_cuda_graph=enable_cuda_graph,
+        contract=contract,
     )
     client.health()
     capture_rig = rig.with_camera_capture(fps=fps, pixel_format="rgb8")
-    cameras: dict[str, cameras_mod.CameraReader] = {}
+    cameras: dict[str, cameras_mod.AnyCameraReader] = {}
     scene = None
     camera_panel = None
     sink: object | None = None
@@ -1846,7 +1867,9 @@ def run_hitl(
     try:
         cameras = open_inference_cameras(capture_rig, overrides=camera_overrides)
         shapes = record_mod.camera_shapes(cameras)
-        state_names = record_mod.arm_feature_names(["left", "right"], {"left": 6, "right": 6})
+        state_names = record_mod.arm_feature_names(
+            rig.names, {name: contract.arm_dof for name in rig.names}
+        )
         features = record_mod.build_features(state_names, shapes, INTERVENTION_FEATURE)
         sink = record_mod.LeRobotSink(
             repo_id=repo_id,
@@ -1888,11 +1911,12 @@ def run_hitl(
             try:
                 if human is None:
                     human = QuestTeleopSource(
-                        ["left", "right"],
+                        list(rig.names),
+                        robot_model=rig.arms[0].model,
                         ws_url=source_url,
                         kit_path=vr_kit,
                         model_path=yam_xml,
-                        config_overrides=teleop_config,
+                        config_overrides=_calibrated_teleop_config(rig, teleop_config),
                         # B and Y mean handoff here, not episode boundaries.
                         emit_episode_events=False,
                     )
@@ -2032,7 +2056,7 @@ def _hitl_episodes(
 
             def on_chunk(actions: np.ndarray) -> None:
                 if scene is not None:
-                    scene.update_chunk(split_chunk(actions))
+                    scene.update_chunk(split_chunk(actions, PolicyContract.from_rig(rig)))
 
             def on_policy_tick(
                 states: Mapping[str, object],
@@ -2232,13 +2256,13 @@ def _command_collect(args: argparse.Namespace, log_path: Path) -> int:
             )
 
     overrides = cameras_mod.parse_camera_overrides(args.camera)
-    rig = resolve_rig(args.rig).with_interfaces(_parse_interface_overrides(args.interface))
+    rig = _configured_rig(args)
     if args.arm != "both":
         rig = rig.subset([args.arm])
-    if any(arm.model != "Yam" or arm.name not in {"left", "right"} for arm in rig.arms):
-        raise ConfigurationError(
-            "Quest collection currently supports left/right YAM follower arms only"
-        )
+    if any(
+        arm.model not in {"Yam", "SO101"} or arm.name not in {"left", "right"} for arm in rig.arms
+    ):
+        raise ConfigurationError("Quest collection supports YAM and SO101 follower arms only")
     if not args.cameras_enabled:
         rig = rig.without_cameras()
     rig = rig.with_camera_capture(
@@ -2419,6 +2443,7 @@ def run_record(
         source = _build_teleop_source(
             teleop,
             dofs=dofs,
+            config_overrides=_calibrated_teleop_config(rig),
             hold_duration_s=hold_duration_s,
             vr_url=vr_url,
             vr_kit=vr_kit,
@@ -2548,7 +2573,7 @@ def run_collect(
     if not dry_run:
         record_mod.require_lerobot()
 
-    cameras: dict[str, cameras_mod.CameraReader] = {}
+    cameras: dict[str, cameras_mod.AnyCameraReader] = {}
     try:
         if rig.cameras:
             discovery = cameras_mod.discover(rig.cameras, overrides=camera_overrides)
@@ -2672,6 +2697,7 @@ def _build_teleop_source(
     teleop: str,
     *,
     dofs: dict[str, int],
+    config_overrides=None,
     hold_duration_s: float,
     vr_url: str | None,
     vr_kit: Path | None,
@@ -2686,6 +2712,8 @@ def _build_teleop_source(
 
         return QuestTeleopSource(
             list(dofs),
+            robot_model="SO101" if set(dofs.values()) == {5} else "Yam",
+            config_overrides=config_overrides,
             ws_url=vr_url or DEFAULT_WS_URL,
             kit_path=vr_kit,
             model_path=yam_xml,
@@ -2756,7 +2784,7 @@ def _add_teleop_ik_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _parse_rest_pose(raw: str | None, *, env_var: str) -> list[float] | None:
+def _parse_rest_pose(raw: str | None, *, env_var: str, dofs: int = 6) -> list[float] | None:
     """Parse a six/seven-value YAM rest pose, including the kit's env format."""
     value = raw if raw is not None else os.environ.get(env_var)
     if not value or not value.strip():
@@ -2767,17 +2795,23 @@ def _parse_rest_pose(raw: str | None, *, env_var: str) -> list[float] | None:
         raise ConfigurationError(
             f"{env_var} / rest pose must contain comma-separated numbers, got {value!r}"
         ) from err
-    if len(parts) not in (6, 7):
+    if len(parts) not in (dofs, dofs + 1):
         raise ConfigurationError(
-            f"{env_var} / rest pose must contain 6 joints or 7 values including gripper; "
+            f"{env_var} / rest pose must contain {dofs} joints "
+            f"or {dofs + 1} values including gripper; "
             f"got {len(parts)}"
         )
-    return parts[:6]
+    return parts[:dofs]
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # Recording is an option of the main teleop workflow, using the shared v3 collector.
+    if argv and argv[0] == "teleop" and ("--record" in argv or "--repo-id" in argv):
+        argv[0] = "collect"
+        argv = [arg for arg in argv if arg != "--record"]
     parser = argparse.ArgumentParser(
-        prog="openpi",
+        prog="karma",
         description="Preflight, control, inference, and teleoperation for a robot cell.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2806,6 +2840,28 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="also open the bus and listen for traffic (reads only, never sends)",
     )
+
+    calibrate_so101 = sub.add_parser(
+        "calibrate-so101", help="manually record SO101 travel ranges and a home pose"
+    )
+    calibrate_so101.add_argument("--interface", required=True, help="SO101 USB serial port")
+    calibrate_so101.add_argument("--output", type=Path, required=True, help="new calibration JSON")
+    calibrate_so101.add_argument(
+        "--center-encoders",
+        action="store_true",
+        help="back up and center firmware encoders before sweeping, like LeRobot calibration",
+    )
+
+    policy_frame = sub.add_parser(
+        "so101-policy-frame",
+        help="capture the LeRobot zero/rotated poses to map Karma's SO101 radians onto a "
+        "checkpoint trained on LeRobot degrees",
+    )
+    policy_frame.add_argument("--interface", required=True, help="SO101 USB serial port")
+    policy_frame.add_argument(
+        "--calibration", type=Path, required=True, help="this arm's SO101 calibration JSON"
+    )
+    policy_frame.add_argument("--output", type=Path, required=True, help="new policy frame JSON")
 
     zero = sub.add_parser("zero", help="write the current pose as each servo's firmware zero")
     _add_common(zero)
@@ -2884,9 +2940,20 @@ def main(argv: list[str] | None = None) -> int:
 
     teleop = sub.add_parser(
         "teleop",
-        help="drive a YAM follower from a Meta Quest using the vendored VR stack",
+        help="drive YAM or SO101 followers from a Meta Quest",
     )
     teleop.add_argument("--rig", default="yam_bimanual", help=f"one of: {', '.join(rig_names())}")
+    teleop.add_argument(
+        "--calibration",
+        action="append",
+        metavar="ARM=FILE",
+        help="load a native SO101 calibration and home pose (repeatable)",
+    )
+    teleop.add_argument(
+        "--record",
+        action="store_true",
+        help="record LeRobot v3; use karma teleop --record --help for recording options",
+    )
     teleop.add_argument(
         "--arm",
         choices=("both", "left", "right"),
@@ -2922,13 +2989,13 @@ def main(argv: list[str] | None = None) -> int:
         "--rest-pose-left",
         default=None,
         metavar="Q1,...,Q6[,GRIP]",
-        help="left IK rest pose; six or seven comma-separated values",
+        help="left IK rest pose: 5 SO101 or 6 YAM joint angles, optional gripper",
     )
     teleop.add_argument(
         "--rest-pose-right",
         default=None,
         metavar="Q1,...,Q6[,GRIP]",
-        help="right IK rest pose; six or seven comma-separated values",
+        help="right IK rest pose: 5 SO101 or 6 YAM joint angles, optional gripper",
     )
     teleop.add_argument(
         "--no-park",
@@ -2998,7 +3065,8 @@ def main(argv: list[str] | None = None) -> int:
     relay.add_argument("--ssl-certfile", default=None, help="TLS certificate (PEM)")
 
     infer = sub.add_parser(
-        "infer",
+        "inference",
+        aliases=["infer"],
         help="run bimanual YAM MolmoAct2 inference, execute chunks, and visualize them",
     )
     infer.add_argument("--rig", default="yam_bimanual", help="the trained bimanual YAM rig")
@@ -3118,7 +3186,7 @@ def main(argv: list[str] | None = None) -> int:
         "--camera",
         action="append",
         metavar="NAME=DEVICE",
-        help="pin one camera to an explicit device (repeatable)",
+        help="pin a camera to a device, or add a UVC webcam by role (e.g. side=/dev/video7)",
     )
     infer.add_argument("--port", type=int, default=8080, help="viser HTTP port")
     infer.add_argument(
@@ -3252,7 +3320,7 @@ def main(argv: list[str] | None = None) -> int:
         "--camera",
         action="append",
         metavar="NAME=DEVICE",
-        help="pin one camera to an explicit device",
+        help="pin a camera to a device, or add a UVC webcam by role on SO101",
     )
     rollout.add_argument("--port", type=int, default=8080, help="viser HTTP port")
     rollout.add_argument(
@@ -3387,7 +3455,7 @@ def main(argv: list[str] | None = None) -> int:
         "--camera",
         action="append",
         metavar="NAME=DEVICE",
-        help="pin one camera to an explicit device",
+        help="pin a camera to a device, or add a UVC webcam by role on SO101",
     )
     hitl.add_argument("--port", type=int, default=8080, help="viser HTTP port")
     hitl.add_argument(
@@ -3476,7 +3544,7 @@ def main(argv: list[str] | None = None) -> int:
         "--camera",
         action="append",
         metavar="NAME=DEVICE",
-        help="pin one camera to an explicit device (repeatable)",
+        help="pin a camera to a device, or add a UVC webcam by role (e.g. side=/dev/video7)",
     )
     rec.add_argument(
         "--repo-id",
@@ -3676,6 +3744,28 @@ def main(argv: list[str] | None = None) -> int:
     collect.add_argument("--ssl-certfile", default=None, help="relay TLS certificate")
     collect.add_argument("--quest-url", default=None, help="browser URL used by --open-quest")
 
+    for command_parser in (infer, rollout, hitl, rec, collect, cams):
+        command_parser.add_argument(
+            "--calibration", action="append", default=[], metavar="ARM=FILE"
+        )
+    for command_parser in (infer, rollout, hitl, teleop, rec, collect, cams):
+        command_parser.add_argument(
+            "--camera-serial",
+            action="append",
+            default=[],
+            metavar="NAME=SERIAL",
+            help="configure top/left_wrist/right_wrist/side RealSense; adds optional views",
+        )
+    for command_parser in (infer, rollout, hitl):
+        command_parser.add_argument(
+            "--norm-tag", help="checkpoint normalization statistics key (required for SO101)"
+        )
+        command_parser.add_argument(
+            "--policy-frame",
+            type=Path,
+            help="state/action frame JSON from `karma so101-policy-frame` when the "
+            "checkpoint was not trained on Karma's radians",
+        )
     args = parser.parse_args(argv)
     log_path = runlog.setup_run_logging(args.command)
 
@@ -3684,7 +3774,10 @@ def main(argv: list[str] | None = None) -> int:
         "zero": _command_zero,
         "live": _command_live,
         "teleop": _command_teleop,
+        "calibrate-so101": _command_calibrate_so101,
+        "so101-policy-frame": _command_so101_policy_frame,
         "relay": _command_relay,
+        "inference": _command_infer,
         "infer": _command_infer,
         "rollout": _command_rollout,
         "hitl": _command_hitl,
@@ -3697,6 +3790,80 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigurationError, InferenceError) as err:
         print(f"error: {err}", file=sys.stderr)
         return 2
+
+
+# Camera roles a policy rig can carry; see inference.MOLMOACT_IMAGE_KEYS for
+# the wire key each one becomes.
+_CAMERA_ROLES = frozenset({"top", "left_wrist", "right_wrist", "side"})
+
+
+def _configured_rig(args):
+    import dataclasses
+
+    from .so101_calibration import apply_profiles
+
+    rig = resolve_rig(args.rig).with_interfaces(
+        _parse_interface_overrides(getattr(args, "interface", None))
+    )
+    paths = _parse_interface_overrides(getattr(args, "calibration", []))
+    if paths:
+        rig = apply_profiles(rig, paths)
+    serials = _parse_interface_overrides(getattr(args, "camera_serial", []))
+    specs = {camera.name: camera for camera in rig.cameras}
+    for name, serial in serials.items():
+        if name not in _CAMERA_ROLES:
+            raise ConfigurationError(f"unknown camera role {name}")
+        if name in specs:
+            specs[name] = dataclasses.replace(specs[name], serial=serial)
+        else:
+            specs[name] = cameras_mod.RigCamera(
+                name=name,
+                serial=serial,
+                label=name,
+                arm=name.removesuffix("_wrist") if name.endswith("_wrist") else None,
+            )
+    # A plain UVC webcam has no serial, so on a rig whose role is either not
+    # declared or still on the placeholder serial, ``--camera ROLE=/dev/videoN``
+    # is the whole configuration. A role that has a real RealSense serial keeps
+    # ``--camera`` as a device pin, exactly as before.
+    devices = cameras_mod.parse_camera_overrides(getattr(args, "camera", None))
+    for name, device in devices.items():
+        if name not in _CAMERA_ROLES:
+            continue
+        existing = specs.get(name)
+        if existing is not None and (existing.backend == "opencv" or existing.serial != "0"):
+            continue
+        if name in serials:
+            continue
+        specs[name] = cameras_mod.RigCamera(
+            name=name,
+            serial="0",
+            label=existing.label if existing is not None else name,
+            arm=name.removesuffix("_wrist") if name.endswith("_wrist") else None,
+            backend="opencv",
+            device=device,
+        )
+    frame = getattr(args, "policy_frame", None)
+    return dataclasses.replace(
+        rig,
+        cameras=tuple(specs.values()),
+        policy_norm_tag=getattr(args, "norm_tag", None),
+        policy_frame=None if frame is None else str(frame),
+    )
+
+
+def _calibrated_teleop_config(rig, overrides=None):
+    from .so101_calibration import load_profile
+
+    config = dict(overrides or {})
+    for arm in rig.arms:
+        if arm.calibration_file is not None:
+            joints = load_profile(arm.calibration_file)["arm_instance"]["joints"]
+            config.setdefault(f"rest_qpos_{arm.name}", [j["servos"][0]["home_pos"] for j in joints])
+            config[f"joint_limits_{arm.name}"] = [
+                [j["servos"][0]["pos_min"], j["servos"][0]["pos_max"]] for j in joints
+            ]
+    return config
 
 
 def _command_doctor(args: argparse.Namespace, log_path: Path) -> int:
@@ -3831,6 +3998,29 @@ def _command_relay(args: argparse.Namespace, log_path: Path) -> int:
     return status
 
 
+def _command_so101_policy_frame(args: argparse.Namespace, log_path: Path) -> int:
+    from .so101_calibration import run_policy_frame_capture
+
+    try:
+        return run_policy_frame_capture(args.interface, args.calibration, args.output)
+    except KeyboardInterrupt:
+        print("policy frame capture aborted; nothing written", file=sys.stderr)
+        return 130
+
+
+def _command_calibrate_so101(args: argparse.Namespace, log_path: Path) -> int:
+    from .so101_calibration import run_calibration
+
+    try:
+        return run_calibration(args.interface, args.output, center=args.center_encoders)
+    except (KeyboardInterrupt, EOFError):
+        print(
+            "\nCalibration cancelled; torque was not enabled. "
+            "Check the output path before retrying."
+        )
+        return 1
+
+
 def _command_teleop(args: argparse.Namespace, log_path: Path) -> int:
     if args.quest_transport == "lan" and args.open_quest:
         raise ConfigurationError("--open-quest is only available with --quest-transport usb")
@@ -3843,7 +4033,7 @@ def _command_teleop(args: argparse.Namespace, log_path: Path) -> int:
                 "or use --quest-transport usb"
             )
 
-    rig = resolve_rig(args.rig).with_interfaces(_parse_interface_overrides(args.interface))
+    rig = _configured_rig(args)
     if args.arm != "both":
         rig = rig.subset([args.arm])
     print(f"teleop: rig {rig.name} — {rig.description}")
@@ -3926,6 +4116,8 @@ def _default_quest_page(args: argparse.Namespace) -> str:
 
 
 def _teleop_config(args: argparse.Namespace) -> dict[str, object]:
+    rig = resolve_rig(args.rig)
+    dofs = 5 if all(arm.model == "SO101" for arm in rig.arms) else 6
     config: dict[str, object] = {"id": args.teleop_id}
     for _, dest, _ in _TELEOP_IK_FIELDS:
         value = getattr(args, dest)
@@ -3940,24 +4132,28 @@ def _teleop_config(args: argparse.Namespace) -> dict[str, object]:
     if args.no_force_haptics:
         config["force_haptic_enabled"] = False
 
-    left_rest = _parse_rest_pose(args.rest_pose_left, env_var="LEFT_REST_POSE")
-    right_rest = _parse_rest_pose(args.rest_pose_right, env_var="RIGHT_REST_POSE")
+    left_rest = _parse_rest_pose(args.rest_pose_left, env_var="LEFT_REST_POSE", dofs=dofs)
+    right_rest = _parse_rest_pose(args.rest_pose_right, env_var="RIGHT_REST_POSE", dofs=dofs)
     if left_rest is not None:
         config["rest_qpos_left"] = left_rest
     if right_rest is not None:
         config["rest_qpos_right"] = right_rest
 
     if args.max_dq_pos is not None or args.max_dq_rot is not None:
-        position_cap = args.max_dq_pos if args.max_dq_pos is not None else 0.06
-        rotation_cap = args.max_dq_rot if args.max_dq_rot is not None else 0.24
+        position_cap = (
+            args.max_dq_pos if args.max_dq_pos is not None else (0.02 if dofs == 5 else 0.06)
+        )
+        rotation_cap = (
+            args.max_dq_rot if args.max_dq_rot is not None else (0.02 if dofs == 5 else 0.24)
+        )
         config["max_dq_per_joint_scalar_pos"] = position_cap
         config["max_dq_per_joint_scalar_rot"] = rotation_cap
-        config["max_dq_per_joint"] = [position_cap] * 3 + [rotation_cap] * 3
+        config["max_dq_per_joint"] = [position_cap] * 3 + [rotation_cap] * (dofs - 3)
     return config
 
 
 def _command_live(args: argparse.Namespace, log_path: Path) -> int:
-    rig = resolve_rig(args.rig).with_interfaces(_parse_interface_overrides(args.interface))
+    rig = _configured_rig(args)
     if args.only:
         rig = rig.subset(args.only)
 
@@ -4027,11 +4223,7 @@ def _runtime_preflight(rig: Rig, *, camera_overrides=None) -> bool:
 
 def _command_infer(args: argparse.Namespace, log_path: Path) -> int:
     """Preflight and run the hardware-coupled MolmoAct2 loop."""
-    rig = resolve_rig(args.rig).with_interfaces(_parse_interface_overrides(args.interface))
-    if rig.names != ("left", "right"):
-        raise ConfigurationError(
-            "infer currently supports only the packaged bimanual left/right YAM rig"
-        )
+    rig = _configured_rig(args)
 
     overrides = cameras_mod.parse_camera_overrides(args.camera)
     if not args.skip_preflight and not _runtime_preflight(
@@ -4068,11 +4260,7 @@ def _command_infer(args: argparse.Namespace, log_path: Path) -> int:
 
 def _command_rollout(args: argparse.Namespace, log_path: Path) -> int:
     """Run interactive, labeled policy rollouts into a LeRobot dataset."""
-    rig = resolve_rig(args.rig).with_interfaces(_parse_interface_overrides(args.interface))
-    if rig.names != ("left", "right"):
-        raise ConfigurationError(
-            "rollout currently supports only the packaged bimanual left/right YAM rig"
-        )
+    rig = _configured_rig(args)
 
     overrides = cameras_mod.parse_camera_overrides(args.camera)
     if not args.skip_preflight and not _runtime_preflight(
@@ -4111,11 +4299,7 @@ def _command_rollout(args: argparse.Namespace, log_path: Path) -> int:
 
 def _command_hitl(args: argparse.Namespace, log_path: Path) -> int:
     """Run DAgger attempts: the policy drives, the operator takes over on Right B."""
-    rig = resolve_rig(args.rig).with_interfaces(_parse_interface_overrides(args.interface))
-    if rig.names != ("left", "right"):
-        raise ConfigurationError(
-            "hitl currently supports only the packaged bimanual left/right YAM rig"
-        )
+    rig = _configured_rig(args)
     if args.relay_port <= 0 or args.relay_port > 65535:
         raise ConfigurationError(f"--relay-port must be between 1 and 65535, got {args.relay_port}")
     if args.quest_transport == "lan" and args.open_quest:
@@ -4180,7 +4364,7 @@ def _command_cameras(args: argparse.Namespace, log_path: Path) -> int:
         raise ConfigurationError(
             "--snapshot needs --probe: a frame has to be grabbed before it can be written"
         )
-    rig = resolve_rig(args.rig)
+    rig = _configured_rig(args)
     if args.only:
         rig = rig.subset(args.only)
     overrides = cameras_mod.parse_camera_overrides(args.camera)
@@ -4214,7 +4398,7 @@ def _command_record(args: argparse.Namespace, log_path: Path) -> int:
         raise ConfigurationError(f"--fps must be positive, got {args.fps}")
 
     overrides = cameras_mod.parse_camera_overrides(args.camera)
-    rig = resolve_rig(args.rig).with_interfaces(_parse_interface_overrides(args.interface))
+    rig = _configured_rig(args)
     if args.only:
         rig = rig.subset(args.only)
     if not args.cameras_enabled:

@@ -5,15 +5,16 @@ for the gravity-compensation model, which needs link inertias and joint origins
 and never needs geometry. Rendering the real arm therefore needs the meshes from
 the vendor's robot description.
 
-This module downloads them once into ``~/openpi-data/meshes/<Model>/`` -- the
-same ``~/openpi-data`` root the run logs use -- so every later run is offline.
+This module downloads them once into ``meshes/<Model>/`` next to the run log
+directory (``logs/`` by default, ``KARMA_LOG_DIR`` overrides) so every later
+run is offline.
 The mesh list is read out of the packaged URDF itself, so a URDF that gains or
 renames a link needs no change here.
 
 Nothing in this module touches a bus, and nothing else in the package imports
 it: fetching is always something you asked for.
 
-    uv run openpi-control-viz --fetch-meshes --model Yam
+    uv run karma-viz --fetch-meshes --model Yam
 """
 
 from __future__ import annotations
@@ -68,9 +69,16 @@ _I2RT_RAW = f"https://raw.githubusercontent.com/i2rt-robotics/i2rt/{_I2RT_REVISI
 # not a stand-in for a missing one. Without this the wrist rendered bare.
 _YAM_WRIST_STL = f"{_I2RT_RAW}/i2rt/robot_models/gripper/crank_4310/assets/link_6_collision.stl"
 
+_SO_ARM100_REVISION = "eecbe3e0a9ebb23e25ad7b2759b03884c6660903"
+_SO_ARM100_RAW = (
+    f"https://raw.githubusercontent.com/TheRobotStudio/SO-ARM100/{_SO_ARM100_REVISION}"
+)
+
 # Only models whose vendor publishes meshes matching the packaged URDF's mesh
 # names appear here. The YAM URDF is i2rt's yam.urdf with its last link renamed
-# to end_link, so the 14 mesh names line up one-to-one.
+# to end_link, so the 14 mesh names line up one-to-one. The SO101 URDF is
+# SO-ARM100's so101_new_calib.urdf with one frame renamed, and its twelve mesh
+# names are published unchanged in the same repository's assets directory.
 MESH_SOURCES: dict[str, MeshSource] = {
     "Yam": MeshSource(
         base_url=f"{_I2RT_RAW}/i2rt/robot_models/arm/yam/assets",
@@ -81,6 +89,12 @@ MESH_SOURCES: dict[str, MeshSource] = {
             "link_6_visual.stl": _YAM_WRIST_STL,
             "link_6_collision.stl": _YAM_WRIST_STL,
         },
+    ),
+    "SO101": MeshSource(
+        base_url=f"{_SO_ARM100_RAW}/Simulation/SO101/assets",
+        revision=_SO_ARM100_REVISION,
+        licence="Apache-2.0",
+        attribution="The Robot Studio — https://github.com/TheRobotStudio/SO-ARM100",
     ),
 }
 

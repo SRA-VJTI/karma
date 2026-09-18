@@ -37,7 +37,7 @@ def test_follower_arm_exposes_the_calibration_gravity_float() -> None:
     # ENTER_GRAVITY_COMPENSATION on followers since 00.00.91, watches the
     # runaway drift in its own control loop (a client round trip is too slow),
     # and HOLD re-engages position control at the current pose.
-    config = ArmConfig("follower", "ARX_X5", SocketCanConnection("test"))
+    config = ArmConfig("follower", "Yam", SocketCanConnection("test"))
     backend = _RecordingBackend()
     arm = FollowerArm(config, topics_for("session", "follower"), backend=backend)
 
@@ -53,7 +53,7 @@ def test_follower_arm_updates_torq_rescale_at_runtime() -> None:
     # gravity_tune switches calibration candidates without a node restart: the
     # native node applies the new per-joint values within one control tick
     # while the arm keeps holding.
-    config = ArmConfig("follower", "ARX_X5", SocketCanConnection("test"))
+    config = ArmConfig("follower", "Yam", SocketCanConnection("test"))
     backend = _RecordingBackend()
     arm = FollowerArm(config, topics_for("session", "follower"), backend=backend)
 

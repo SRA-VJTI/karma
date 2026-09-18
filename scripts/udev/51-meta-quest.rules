@@ -1,0 +1,2 @@
+# Meta/Oculus Quest USB access for ADB. Vendor verified with lsusb.
+SUBSYSTEM=="usb", ATTR{idVendor}=="2833", MODE="0660", GROUP="plugdev", TAG+="uaccess"

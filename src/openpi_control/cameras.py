@@ -63,7 +63,7 @@ BY_ID_DIR = SYSTEM_BY_ID_DIR
 DEFAULT_COLOR_INDEX = 4
 
 # by-id entries look like:
-#   usb-Intel_R__RealSense_TM__Depth_Camera_405_..._254623070531-video-index4
+#   usb-Intel_R__RealSense_TM__Depth_Camera_405_..._000000000004-video-index4
 # Capture the serial (the digits before ``-video-index``) and the node number.
 #
 # At least six digits, because a camera whose USB descriptor carries no serial
@@ -93,6 +93,13 @@ VALID_ROTATIONS = (0, 90, 180, 270)
 # recorder asks for rgb8 and then needs no conversion at all.
 VALID_PIXEL_FORMATS = ("bgr8", "rgb8")
 DEFAULT_PIXEL_FORMAT = "bgr8"
+
+# Capture backends. ``realsense`` is the measured default (see CameraReader).
+# ``opencv`` reads any plain UVC webcam through ``cv2.VideoCapture``: it has no
+# serial the rig can key on, so its identity is the device path -- pin it with
+# ``--camera NAME=/dev/videoN`` and keep the USB topology stable.
+VALID_BACKENDS = ("realsense", "opencv")
+DEFAULT_BACKEND = "realsense"
 
 
 # How long to keep retrying a camera that reports itself busy, and how often.
@@ -124,6 +131,10 @@ class RigCamera:
 
     ``extrinsic`` is optional calibration metadata for scene visualization. It
     does not alter the policy image or camera discovery.
+
+    ``backend`` picks how the stream is opened. An ``opencv`` camera is a plain
+    UVC webcam addressed by ``device`` (a ``/dev/videoN`` path) rather than by
+    serial; ``serial`` is then only a placeholder.
     """
 
     name: str
@@ -137,11 +148,23 @@ class RigCamera:
     pixel_format: str = DEFAULT_PIXEL_FORMAT
     color_index: int = DEFAULT_COLOR_INDEX
     extrinsic: CameraExtrinsic | None = None
+    backend: str = DEFAULT_BACKEND
+    device: str | None = None
 
     def __post_init__(self) -> None:
         if not self.name:
             raise ConfigurationError("a rig camera needs a name")
-        if not self.serial.isdigit():
+        if self.backend not in VALID_BACKENDS:
+            raise ConfigurationError(
+                f"camera {self.name!r} asks for backend {self.backend!r}; "
+                f"supported: {', '.join(VALID_BACKENDS)}"
+            )
+        if self.backend == "opencv" and not self.device:
+            raise ConfigurationError(
+                f"camera {self.name!r} uses the opencv backend and needs a device path, "
+                "e.g. --camera top=/dev/video4"
+            )
+        if self.backend == "realsense" and not self.serial.isdigit():
             raise ConfigurationError(
                 f"camera {self.name!r} has serial {self.serial!r}; RealSense serials are "
                 "digits, exactly as they appear in the /dev/v4l/by-id path"
@@ -183,6 +206,7 @@ class FoundCamera:
             fps=self.camera.fps,
             rotate=self.camera.rotate,
             pixel_format=self.camera.pixel_format,
+            backend=self.camera.backend,
         )
 
 
@@ -209,10 +233,11 @@ class DiscoveryResult:
 class CameraSpec:
     """Everything :class:`CameraReader` needs to open one stream.
 
-    ``serial`` is what actually selects the camera -- the SDK addresses devices,
-    not device files. ``device`` is carried along for diagnostics: it is the
-    v4l2 node the presence check found, and it is what an operator sees in
-    ``dmesg`` or hands to ``v4l2-ctl``.
+    ``serial`` is what actually selects a RealSense -- the SDK addresses
+    devices, not device files. ``device`` is carried along for diagnostics: it
+    is the v4l2 node the presence check found, and it is what an operator sees
+    in ``dmesg`` or hands to ``v4l2-ctl``. For the ``opencv`` backend the roles
+    swap: ``device`` is what gets opened and ``serial`` is a placeholder.
     """
 
     name: str
@@ -224,8 +249,14 @@ class CameraSpec:
     fps: int = DEFAULT_FPS
     rotate: int = 0
     pixel_format: str = DEFAULT_PIXEL_FORMAT
+    backend: str = DEFAULT_BACKEND
 
     def __post_init__(self) -> None:
+        if self.backend not in VALID_BACKENDS:
+            raise ConfigurationError(
+                f"camera {self.name!r} asks for backend {self.backend!r}; "
+                f"supported: {', '.join(VALID_BACKENDS)}"
+            )
         # RigCamera validates the same fields, but a spec can also be built by
         # hand -- and this is the type CameraReader consumes, so an unchecked
         # value here surfaces as an SDK AttributeError or a KeyError deep in the
@@ -335,6 +366,16 @@ def discover(
     missing: dict[str, str] = {}
     for camera in cameras:
         pinned = overrides.get(camera.name)
+        if camera.backend == "opencv":
+            # A webcam has no serial to look up: the path is the identity, so
+            # "present" simply means the node exists right now.
+            device = camera.device if pinned is None else pinned
+            assert device is not None  # RigCamera enforces it for this backend
+            if Path(device).exists():
+                matched[camera.name] = FoundCamera(camera, device, overridden=pinned is not None)
+            else:
+                missing[camera.name] = device
+            continue
         if pinned is not None:
             if Path(pinned).exists():
                 matched[camera.name] = FoundCamera(camera, pinned, overridden=True)
@@ -353,7 +394,7 @@ def discover(
         else:
             matched[camera.name] = FoundCamera(camera, device)
 
-    claimed = {camera.serial for camera in cameras}
+    claimed = {camera.serial for camera in cameras if camera.backend == "realsense"}
     present = {serial for serial, _ in nodes}
     if sdk_serials is None and not claimed.issubset(present):
         sdk_serials = sdk_present_asic_serials()
@@ -535,17 +576,138 @@ class CameraReader:
         self.stop()
 
 
-def open_readers(specs: Iterable[CameraSpec]) -> dict[str, CameraReader]:
+class OpenCVCameraReader:
+    """A background grabber for a plain UVC webcam via ``cv2.VideoCapture``.
+
+    Same surface as :class:`CameraReader` -- latest-frame-wins, one consumer
+    per device, ``pixel_format`` honoured -- so everything downstream treats
+    the two alike. It asks V4L2 for MJPG, which is what lifts a typical webcam
+    from ~10 fps (raw YUYV over USB 2 bandwidth) to its advertised rate.
+
+    The camera decides the mode: a webcam that does not offer the requested
+    size silently negotiates the nearest one instead of failing, so
+    :attr:`negotiated` is the truth and the frames are whatever size it says.
+    Nothing here rescales -- a policy trained on one framing should not get a
+    stretched version of another without someone deciding that on purpose.
+    """
+
+    def __init__(self, spec: CameraSpec) -> None:
+        cv2 = _require_cv2()
+        self.spec = spec
+        self._lock = threading.Lock()
+        self._frame: np.ndarray | None = None
+        self._frames_read = 0
+        self._stop = threading.Event()
+        self._started = threading.Event()
+
+        self._capture = cv2.VideoCapture(spec.device, cv2.CAP_V4L2)
+        if not self._capture.isOpened():
+            raise ConfigurationError(
+                f"cannot open camera {spec.name!r} at {spec.device} with OpenCV "
+                "— check the path with `v4l2-ctl --list-devices` and that nothing "
+                "else is streaming it (a camera opens once)"
+            )
+        # Order matters on V4L2: the pixel format has to land before the size,
+        # or the driver keeps the raw format and the size request is clamped
+        # to what that format can push over the bus.
+        self._capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, spec.width)
+        self._capture.set(cv2.CAP_PROP_FRAME_HEIGHT, spec.height)
+        self._capture.set(cv2.CAP_PROP_FPS, spec.fps)
+        # Latest-frame-wins needs the driver queue shallow too, or `read()`
+        # hands back frames that are several ticks old.
+        self._capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+        self._thread = threading.Thread(
+            target=self._loop, name=f"camera-{spec.name}", daemon=True
+        )
+        self._thread.start()
+
+    @property
+    def pixel_format(self) -> str:
+        return self.spec.pixel_format
+
+    @property
+    def frames_read(self) -> int:
+        with self._lock:
+            return self._frames_read
+
+    @property
+    def negotiated(self) -> tuple[str, int, int, int]:
+        """``(fourcc, width, height, fps)`` as V4L2 actually agreed to."""
+        cv2 = _require_cv2()
+        code = int(self._capture.get(cv2.CAP_PROP_FOURCC))
+        fourcc = "".join(chr((code >> (8 * i)) & 0xFF) for i in range(4)).strip("\x00")
+        return (
+            fourcc or "unknown",
+            int(self._capture.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            int(self._capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            int(round(self._capture.get(cv2.CAP_PROP_FPS))),
+        )
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            ok, frame = self._capture.read()
+            if not ok or frame is None:
+                # Same policy as the SDK reader: a dropped grab is not fatal,
+                # the consumer keeps the last good frame.
+                time.sleep(0.005)
+                continue
+            if self.spec.pixel_format == "rgb8":
+                frame = np.ascontiguousarray(frame[..., ::-1])
+            if self.spec.rotate:
+                frame = _rotate(frame, self.spec.rotate)
+            with self._lock:
+                self._frame = frame
+                self._frames_read += 1
+            self._started.set()
+
+    def latest(self) -> np.ndarray | None:
+        with self._lock:
+            return self._frame
+
+    def wait_for_frame(self, timeout_s: float = 5.0) -> np.ndarray | None:
+        self._started.wait(timeout_s)
+        return self.latest()
+
+    def measure_fps(self, window_s: float = 2.0) -> float:
+        before = self.frames_read
+        time.sleep(window_s)
+        return (self.frames_read - before) / window_s
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2.0)
+        self._capture.release()
+
+    def __enter__(self) -> OpenCVCameraReader:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.stop()
+
+
+AnyCameraReader = CameraReader | OpenCVCameraReader
+
+
+def open_camera(spec: CameraSpec) -> AnyCameraReader:
+    """Open one stream with whichever backend the spec names."""
+    if spec.backend == "opencv":
+        return OpenCVCameraReader(spec)
+    return CameraReader(spec)
+
+
+def open_readers(specs: Iterable[CameraSpec]) -> dict[str, AnyCameraReader]:
     """Open every spec, or none of them.
 
     Half-open camera sets are the kind of thing that produces a dataset with
     one camera silently absent, so a failure here releases what was already
     opened and re-raises.
     """
-    readers: dict[str, CameraReader] = {}
+    readers: dict[str, AnyCameraReader] = {}
     try:
         for spec in specs:
-            readers[spec.name] = CameraReader(spec)
+            readers[spec.name] = open_camera(spec)
     except BaseException:
         for reader in readers.values():
             reader.stop()
@@ -553,7 +715,7 @@ def open_readers(specs: Iterable[CameraSpec]) -> dict[str, CameraReader]:
     return readers
 
 
-def close_readers(readers: Mapping[str, CameraReader]) -> None:
+def close_readers(readers: Mapping[str, AnyCameraReader]) -> None:
     """Stop every reader, even if one of them raises on the way down."""
     for reader in readers.values():
         try:
@@ -588,7 +750,7 @@ def sdk_serial_for_asic(asic_serial: str) -> str:
 
     A D405 answers to two numbers. ``/dev/v4l/by-id`` (and the USB descriptor,
     and vr-teleop-kit's ``cams.env``) carry the *ASIC* serial -- e.g.
-    ``254623070531``. The SDK's own ``serial_number`` is a different value --
+    ``000000000004``. The SDK's own ``serial_number`` is a different value --
     e.g. ``352122273221`` -- and that is the one ``enable_device`` wants. Rigs
     declare the ASIC serial because that is the one an operator can actually
     look up without the SDK installed; this bridges the two.

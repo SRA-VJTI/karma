@@ -21,12 +21,6 @@ set(OPENPI_CONTROL_PINOCCHIO_PREFIX "${OPENPI_CONTROL_DEPS_DIR}/pinocchio/instal
     "Pinocchio installation prefix used by openpi-control")
 set(OPENPI_CONTROL_CPPZMQ_PREFIX "${OPENPI_CONTROL_DEPS_DIR}/cppzmq/install" CACHE PATH
     "cppzmq installation prefix used by openpi-control")
-set(OPENPI_CONTROL_TROSSEN_PREFIX "${OPENPI_CONTROL_DEPS_DIR}/trossen_arm/install" CACHE PATH
-    "libtrossen_arm installation prefix used by openpi-control")
-set(OPENPI_CONTROL_LIBFRANKA_PREFIX "${OPENPI_CONTROL_DEPS_DIR}/libfranka/install" CACHE PATH
-    "libfranka installation prefix used by openpi-control")
-set(OPENPI_CONTROL_LIBMODBUS_PREFIX "${OPENPI_CONTROL_DEPS_DIR}/libmodbus/install" CACHE PATH
-    "libmodbus installation prefix used by openpi-control")
 
 if(EXISTS "${OPENPI_CONTROL_PINOCCHIO_PREFIX}/lib/pkgconfig/pinocchio.pc")
   list(PREPEND CMAKE_PREFIX_PATH "${OPENPI_CONTROL_PINOCCHIO_PREFIX}")
@@ -43,13 +37,7 @@ if(EXISTS "${OPENPI_CONTROL_CPPZMQ_PREFIX}/include/zmq.hpp")
   set(OPENPI_CONTROL_CPPZMQ_INCLUDE_DIR "${OPENPI_CONTROL_CPPZMQ_PREFIX}/include")
 endif()
 
-if(EXISTS "${OPENPI_CONTROL_TROSSEN_PREFIX}/lib/libtrossen_arm.a")
-  list(PREPEND CMAKE_PREFIX_PATH "${OPENPI_CONTROL_TROSSEN_PREFIX}")
-endif()
 
-if(EXISTS "${OPENPI_CONTROL_LIBFRANKA_PREFIX}/lib/libfranka.a")
-  list(PREPEND CMAKE_PREFIX_PATH "${OPENPI_CONTROL_LIBFRANKA_PREFIX}")
-endif()
 
 # Sanitizer plumbing for the test targets. Valid values: "" (off), "address,undefined",
 # "thread". Applied globally so the exercised pi_control sources are instrumented too.

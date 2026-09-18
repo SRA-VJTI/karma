@@ -1,571 +1,345 @@
-# OpenPI Control for Karma
+# Karma
 
-Robot-cell control for the Karma bimanual YAM platform: native arm control,
-Meta Quest VR teleoperation, LeRobot v3 demonstration collection, MolmoAct2
-inference, rollout and human-in-the-loop (DAgger) recording, RealSense cameras,
-and live Viser visualization. Each arm runs one `pi_control_node` process and
-communicates with the Python operator process over ZeroMQ.
+Karma is the robot-side workstation stack for **bimanual YAM** and **SO100/SO101**
+arms: Meta Quest VR teleoperation, MolmoAct2 policy inference, autonomous
+rollout recording, and human-in-the-loop (HITL / DAgger) data collection.
+The Quest relay and WebXR client, the IK, the native motor runtime, the camera
+capture layer and the LeRobot v3 dataset writer all live in this repository.
 
-> [!CAUTION]
-> `teleop`, `collect`, `infer`, `rollout`, and `hitl` energize physical robot
-> arms. Run them in the foreground with the workspace clear. Their normal Ctrl-C
-> paths park the selected arms at `home_pos` and then de-energize them; do not
-> use `--no-park` unless stopping in place is intentional and safe.
+Everything runs through one executable, `uv run karma`, with four main workflows:
 
-| Arm | Joints | Bus | Follower effector | Leader effector |
+| Workflow | Command | What it does |
+| --- | --- | --- |
+| Teleop | `karma teleop` | Drive the arms from a Quest; add `--record` to write demonstrations |
+| Inference | `karma inference` | Run a MolmoAct2 checkpoint continuously with one instruction |
+| Rollout | `karma rollout` | Timed policy episodes, task asked per episode, saved as a dataset |
+| HITL | `karma hitl` | Policy drives, you take over from the Quest when needed; DAgger labels |
+
+The model itself runs elsewhere: a MolmoAct2 **server** on a GPU host, which
+Karma talks to over HTTP. See [Model servers](docs/model-servers.md).
+
+## Supported hardware
+
+| Rig | Arms | Bus | State/action width | Cameras |
 | --- | --- | --- | --- | --- |
-| `Yam` | 6 | SocketCAN | `E_Yam` | `E_Yam_Handle` |
-| `ARX_X5` | 6 | SocketCAN | `E_ARX` | `E_ARX_ENC` |
-| `ARX_L5` | 6 | SocketCAN | `E_ARX` | `E_ARX_ENC` |
-| `ARX_ENC` | 6 | SocketCAN | — (leader only, read-only) | `E_ARX_ENC` |
-| `FR3` | 7 | Franka controller | `Robotiq` | — |
-| `SO101` | 5 | USB serial | `E_SO101` | — |
-| `Trossen_wai_ctrl` | 6 | Ethernet controller | `E_Trossen_ctrl` | — |
+| `yam_bimanual` | two YAM, E_Yam grippers | SocketCAN (`can0`, `can1`) | 14 (6 joints + gripper per arm) | `top`, `left_wrist`, `right_wrist` |
+| `so101` | one SO101 (right) | USB serial (`/dev/ttyACM0`) | 6 (5 joints + gripper) | `top` plus optional `side`, `right_wrist` |
+| `so101_bimanual` | two SO101 | USB serial | 12 | `top` plus optional wrists |
 
-```python
-from openpi_control import ArmConfig, ArmSession, PositionCommand, SocketCanConnection
+Cameras can be **Intel RealSense** (addressed by serial, captured through the
+SDK) or **plain USB/UVC webcams** (addressed by `/dev/videoN`, captured through
+OpenCV). Both go through the same reader interface, so every workflow accepts
+either. See [Cameras](docs/cameras.md).
 
-with ArmSession() as session:
-    follower = session.add_follower(
-        ArmConfig(
-            "right_follower",
-            "Yam",
-            SocketCanConnection("can_follower_r"),
-            effector_model="E_Yam",
-            follower_gravity_compensation=True,
-        )
-    )
-    session.connect()
-    follower.command(PositionCommand([0, 0, 0, 0, 0, 0], 1.0))
-```
+SO100 hardware runs with the SO101 model and calibration; original SO100
+gearing/geometry has not been validated by the SO101 checks.
 
-FR3 uses the same `ArmSession`, `FollowerArm`, and `PositionCommand` API. Its
-connection selects one of the two real Robotiq Modbus transports:
+## Install once
 
-```python
-from openpi_control import FR3Connection, RobotiqConnection
-
-config = ArmConfig(
-    "follower",
-    "FR3",
-    FR3Connection("192.168.1.10"),
-    effector_model="Robotiq",
-    effector_connection=RobotiqConnection.rtu("/dev/serial/by-id/usb-robotiq"),
-    # Or: RobotiqConnection.tcp("192.168.1.11", port=502),
-)
-```
-
-See [docs/fr3.md](docs/fr3.md) for firmware, networking, controller, and
-hardware-validation details.
-
-## Installing
-
-```bash
-uv sync
-```
-
-That is the whole install for an operator box: cameras, MolmoAct2 inference,
-the Viser scene, VR teleop, LeRobot v3 collection, and the test tools all arrive
-together. `uv sync` is an *exact* sync -- it uninstalls whatever the command
-did not ask for -- so
-naming one extra at a time (`uv sync --extra cameras`) used to strip the extras
-a live cell had just installed. The `cell` dependency-group in `pyproject.toml`
-is a default group, so it is always included and no later `--extra` can drop it.
-
-LeRobot pulls in torch, so the first sync is larger than a control-only install.
-It is included deliberately: `uv run openpi collect ...` works as written and
-does not discover a missing dataset writer after a hardware session begins.
-
-## Robot-cell quick start
-
-All normal operator workflows use the unified `openpi` entry point:
-
-```bash
-uv run openpi --help
-uv run openpi <command> --help
-```
-
-The commands below assume this robot box's persistent SocketCAN names:
-
-```bash
-ip -brief link show type can
-```
-
-Expected:
-
-```text
-can_right  UP  <NOARP,UP,LOWER_UP,ECHO>
-can_left   UP  <NOARP,UP,LOWER_UP,ECHO>
-```
-
-Run `uv sync` once after pulling code or changing dependencies. Do not prefix
-every operator command with another `uv sync`; `uv run` uses the synchronized
-environment directly.
-
-### 1. Meta Quest teleoperation
-
-Bimanual VR teleoperation:
-
-```bash
-uv run openpi teleop --arm both --open-quest \
-    --interface left=can_left \
-    --interface right=can_right
-```
-
-Single-arm VR teleoperation:
-
-```bash
-uv run openpi teleop --arm left --open-quest \
-    --interface left=can_left
-
-uv run openpi teleop --arm right --open-quest \
-    --interface right=can_right
-```
-
-With the default USB transport, that one command starts the in-process WebXR
-relay, creates `adb reverse tcp:8443 tcp:8443`, and opens the relay page in the
-Quest browser. Do not run a separate relay or `adb reverse` for this path.
-Use `--adb-serial SERIAL` only when `adb devices` shows more than one Quest.
-
-Quest controls:
-
-| Control | Action |
-| --- | --- |
-| Grip | Clutch that controller to its arm; releasing grip freezes the arm target |
-| Trigger | Close/open that arm's gripper |
-| A / X | Precision mode while held |
-| Thumbstick click | Smoothly return that arm to its configured rest pose |
-| Ctrl-C in the terminal | Park both selected arms and de-energize |
-
-### 2. Record a teleoperated LeRobot v3 dataset
-
-Bimanual collection with the top camera and both wrist cameras:
-
-```bash
-uv run openpi collect --arm both --open-quest \
-    --interface left=can_left \
-    --interface right=can_right \
-    --format lerobot-v3 \
-    --repo-id SRA-VJTI/fold-pink-towel-v1 \
-    --task "Fold the pink towel in half" \
-    --num-episodes 20
-```
-
-Use a concrete `--task`; it is stored on every frame. Never leave example text
-such as `Describe the manipulation task` in a training dataset. Unless
-`--root` is supplied, LeRobot writes under
-`~/.cache/huggingface/lerobot/<repo-id>`. To choose the location explicitly:
-
-```bash
-uv run openpi collect --arm both --open-quest \
-    --interface left=can_left \
-    --interface right=can_right \
-    --repo-id SRA-VJTI/fold-pink-towel-v1 \
-    --root ~/openpi-data/datasets/fold-pink-towel-v1 \
-    --task "Fold the pink towel in half" \
-    --num-episodes 20
-```
-
-Single-arm collection automatically keeps the top camera and only the selected
-arm's wrist camera:
-
-```bash
-uv run openpi collect --arm left --open-quest \
-    --interface left=can_left \
-    --repo-id SRA-VJTI/left-arm-task-v1 \
-    --task "Place the object in the tray" \
-    --num-episodes 20
-
-uv run openpi collect --arm right --open-quest \
-    --interface right=can_right \
-    --repo-id SRA-VJTI/right-arm-task-v1 \
-    --task "Place the object in the tray" \
-    --num-episodes 20
-```
-
-Open <http://localhost:8080> during collection for measured-arm and live-camera
-Viser visualization. The collector shares each RealSense reader between the
-dataset, Viser, and Quest; it does not open the cameras three times.
-
-| In VR | Episode action |
-| --- | --- |
-| Right B | Start recording; while recording, discard that take and restart it |
-| Left Y | Save the current episode |
-| Ctrl-C | Discard an unsaved open take, finalize saved episodes, park, and de-energize |
-
-The session exits automatically after `--num-episodes` successful saves. Add
-`--push-to-hub --private` to upload only after the dataset is finalized and the
-arms are down. Use a fresh `--repo-id`/`--root` when starting a separate
-dataset.
-
-### 3. Run MolmoAct2 inference
-
-Start the MolmoAct2 HTTP server from its checkout on the GPU machine:
-
-```bash
-uv run python host_server_yam.py \
-    --host 0.0.0.0 \
-    --port 4090 \
-    --cuda-graph
-```
-
-Then run the robot-side client on the Karma box:
-
-```bash
-uv run openpi infer \
-    --server http://192.168.0.107:4090 \
-    --instruction "Fold the pink towel in half" \
-    --interface left=can_left \
-    --interface right=can_right \
-    --speed 0.5 \
-    --port 8080
-```
-
-`infer` opens all three cameras, powers both arms, sends observations in
-`top, left_wrist, right_wrist` order, executes bounded action chunks, and
-serves Viser at <http://localhost:8080>. The Viser camera tiles are the exact
-policy-input observations, not independent preview frames. Ctrl-C or an
-inference/hardware error parks and de-energizes both arms.
-
-The server URL may be `host:port` or a full URL; `/act` is appended
-automatically. `--speed 0.5` follows the same planned path over twice the
-control ticks and is the normal conservative starting point on this cell.
-
-### 4. Record MolmoAct2 policy rollouts
-
-Use `rollout`, not `collect`, when MolmoAct2 drives the arms and each policy
-attempt should become a labeled LeRobot v3 episode:
-
-```bash
-uv run openpi rollout \
-    --repo-id SRA-VJTI/molmo-fold-pink-towel-rollouts-v1 \
-    --root ~/openpi-data/rollouts/molmo-fold-pink-towel-v1 \
-    --episodes 3 \
-    --episode-seconds 120 \
-    --server http://192.168.0.107:4090 \
-    --interface left=can_left \
-    --interface right=can_right \
-    --speed 0.5 \
-    --port 8080
-```
-
-The first attempt starts by asking for its prompt. Before every later attempt,
-the command asks you to reset the scene and then enter that episode's prompt.
-Afterward it asks `Episode N successful? [y/n]:`. Every frame stores the prompt
-in LeRobot's `task` field, while
-`openpi_control_rollouts.json` stores the success label, interruption status,
-and saved dataset episode index.
-
-Ctrl-C during an active rollout saves the captured prefix as a partial episode,
-parks both arms, and continues to the result prompt; it differs deliberately
-from `collect`, where Ctrl-C discards an unfinished demonstration. A second
-Ctrl-C at an interactive prompt exits the multi-episode run. Viser is available
-at <http://localhost:8080> throughout each attempt.
-
-### 5. Record human corrections (DAgger)
-
-Use `hitl` when the policy should drive but you want to be able to rescue it,
-and to keep what you did when you rescued it:
-
-```bash
-uv run openpi hitl \
-    --repo-id SRA-VJTI/molmo-fold-pink-towel-dagger-v1 \
-    --root ~/openpi-data/dagger/molmo-fold-pink-towel-v1 \
-    --episodes 5 \
-    --episode-seconds 120 \
-    --server http://192.168.0.107:4090 \
-    --interface left=can_left \
-    --interface right=can_right \
-    --speed 0.5 \
-    --open-quest
-```
-
-| In VR | Does |
-| --- | --- |
-| Right B | Take the arms; the policy stops |
-| Left Y (tap) | Hand back; the policy re-plans and continues |
-| Left Y (hold 1s) | End this attempt now — save, park, `y/n`, next attempt |
-
-`--episode-seconds` is a backstop; hold Left Y (or press Ctrl-C) when the
-attempt is done rather than waiting it out.
-
-Every frame is recorded with an `intervention` column saying who was driving,
-so the dataset can be filtered to the corrections alone for HG-DAgger training.
-`openpi_control_hitl.json` records each attempt's prompt, `y/n` label, and
-takeover counts. See [docs/dagger.md](docs/dagger.md).
-
-### Workflow summary
-
-| Goal | Command | Driver | Cameras | Dataset |
-| --- | --- | --- | --- | --- |
-| Move arms from Quest | `uv run openpi teleop` | Human/Quest | Quest preview | No |
-| Record demonstrations | `uv run openpi collect` | Human/Quest | Top + selected wrist camera(s) | LeRobot v3 |
-| Run a policy | `uv run openpi infer` | MolmoAct2 | Top + both wrists | No |
-| Record policy attempts | `uv run openpi rollout` | MolmoAct2 | Top + both wrists | LeRobot v3 + rollout manifest |
-| Record corrections | `uv run openpi hitl` | MolmoAct2, human on Right B | Top + both wrists | LeRobot v3 + `intervention` column + manifest |
-
-All five hardware workflows preflight before energizing and own their complete
-shutdown path. Keep them in the foreground and use Ctrl-C rather than killing
-their native child processes directly.
-
-## Operator CLI
-
-`openpi` preflights an arm, sets its servo zeros, and brings a rig up
-and back down. Every run logs to `~/openpi-data/logs/runtime/`.
-
-```bash
-uv run openpi doctor --model Yam --interface can_right --effector E_Yam
-uv run openpi zero   --model Yam --interface can_right --dry-run
-uv run openpi doctor --rig yam_bimanual \
-    --interface-override left=can_left \
-    --interface-override right=can_right
-uv run openpi live --rig yam_bimanual \
-    --interface left=can_left --interface right=can_right
-```
-
-`doctor` is read-only and opens no bus unless given `--probe`; it checks the
-packaged assets, that every `servo_model` has a driver, and that the interface
-is present, up, and at the bit rate the model wants. `zero` writes the arm's
-current pose as each servo's firmware zero, so it confirms first. See
-[docs/cli.md](docs/cli.md).
-
-## Rigs, and turning them on and off
-
-A rig names a whole cell — which arms it has, the bus each sits on, and where
-their bases sit relative to each other — so the CLI and the visualizer mean the
-same thing by `left`. `yam_bimanual` is two YAM followers with `E_Yam` grippers,
-with packaged defaults of left on `can0` and right on `can1`. This cell uses
-persistent aliases instead, so its operator commands pass
-`--interface left=can_left --interface right=can_right`.
-
-`openpi live` is the one command here that energizes an arm, and it owns
-the whole arc:
-
-```bash
-uv run openpi live --rig yam_bimanual \
-    --interface left=can_left --interface right=can_right
-uv run openpi live --rig yam_bimanual --float \
-    --interface left=can_left --interface right=can_right
-uv run openpi live --rig yam_bimanual --only left --no-viz \
-    --interface left=can_left
-```
-
-Preflight runs first and nothing is energized unless every arm passes. Both
-followers then come up *holding* — `--float` is the opt-in for a backdrivable
-arm. ctrl-c parks each arm at the `home_pos` in its instance JSON before cutting
-torque, so an arm is never dropped from wherever it stood.
-
-There is no separate `up` and `down`: `pi_control_node` holds a liveness pipe to
-the process that spawned it, so an arm cannot stay energized after the command
-returns. One foreground process owns the lifecycle, and ctrl-c is the way out.
-
-## Running MolmoAct2 on the YAM hardware
-
-The robot-side inference command uses the MolmoAct2 `/act` HTTP contract. Start
-the GPU inference server separately, then run the client on the robot box:
-
-```bash
-uv run openpi infer \
-    --server http://192.168.0.107:4090 \
-    --instruction "Fold the pink towel in half" \
-    --interface left=can_left \
-    --interface right=can_right \
-    --speed 0.5 \
-    --port 8080
-```
-
-It opens the three YAM cameras, powers both arms, executes whole action chunks
-with bounded interpolation, and serves a Viser page showing measured poses,
-camera previews, and translucent predicted end-effector trails. The command
-parks both arms at `home_pos` on Ctrl-C or an inference/hardware error.
-
-The wire defaults match the reference MolmoAct2 deployment -- CUDA-graph
-requests, JPEG frame transport, a keep-alive connection, full 30-action chunks.
-How those chunks are executed deliberately does not: `--reach-actions`,
-`--prefetch`, and `--reset-start-pose` switch the reference runtime on piece by
-piece. See [docs/inference.md](docs/inference.md) for the wire ordering and why.
-
-### Recording policy rollouts
-
-Sync the operator environment once, then use `rollout` for timed episodes. The
-command asks for a new prompt before every episode and asks `y/n` after each
-episode, including a Ctrl-C-interrupted partial episode. Ctrl-C stops only the
-current episode: its captured frames are saved, both arms park at `home_pos`,
-and the next episode starts after you reset the same towel.
-
-```bash
-uv run openpi rollout \
-    --repo-id SRA-VJTI/molmo-fold-pink-towel-rollouts-v1 \
-    --root ~/openpi-data/rollouts/molmo-fold-pink-towel-v1 \
-    --episodes 3 \
-    --episode-seconds 120 \
-    --server http://192.168.0.107:4090 \
-    --interface left=can_left \
-    --interface right=can_right \
-    --speed 0.5 \
-    --port 8080
-```
-
-LeRobot v3 data is written under `--root`. The same directory receives
-`openpi_control_rollouts.json`, which stores the per-attempt prompt, whether
-the attempt was interrupted, and its `y/n` label. The dataset's `task` field
-also contains the prompt on every frame.
-
-## Cameras
-
-Three RealSense D405s watch the bimanual cell: one overhead, one per wrist. They
-are part of the rig, pinned by serial number — a `/dev/videoN` is not a camera,
-it changes with boot order and which port you used.
-
-```bash
-uv run openpi cameras                # what is plugged in, and where
-uv run openpi cameras --probe        # open each one and measure it
-```
-
-A wrist camera names the arm it rides on, so `--only right` narrows to `top` and
-`right_wrist` without anyone special-casing it. Discovery itself reads udev and
-nothing else, so `doctor --rig` can report an unplugged camera on a box with no
-SDK installed.
-
-Two defaults are measurements rather than taste: 848x480 (the D405's native
-mode — 640x480 makes the firmware rescale and three cameras drop to 15-20 fps),
-and capture through `pyrealsense2` rather than OpenCV (whose V4L2 path tops out
-near 10-13 fps on the same node that `v4l2-ctl` streams at 30). See
-[docs/cameras.md](docs/cameras.md).
-
-## Collecting data
-
-`openpi collect` is the integrated Meta Quest collection command. It starts the
-relay and USB tunnel, teleoperates the selected arm(s), writes LeRobot v3 —
-parquet for state/action and one MP4 per camera — and serves Viser at
-<http://localhost:8080> with measured arm poses and the live frames being
-recorded.
-
-```bash
-uv run openpi collect --arm both --open-quest \
-    --interface left=can_left \
-    --interface right=can_right \
-    --format lerobot-v3 \
-    --repo-id SRA-VJTI/fold-pink-towel-v1 \
-    --task "Fold the pink towel in half" \
-    --num-episodes 20
-```
-
-`--arm both` records `top`, `left_wrist`, and `right_wrist`. A single-arm
-collection keeps the head/top view and only that arm's wrist camera:
-
-```bash
-uv run openpi collect --arm right --open-quest \
-    --interface right=can_right \
-    --repo-id SRA-VJTI/right-arm-pick-v1 \
-    --task "Pick up the object"
-```
-
-One RealSense capture is shared by the dataset writer, Viser, and Quest WebRTC,
-so all three camera consumers can run together without fighting over the device.
-Use `--no-viz` only when the browser preview is not wanted. `record` remains as
-the lower-level/legacy command for an independently managed relay.
-
-The complete Quest stack is vendored in this repository: the WebXR relay,
-Quest page, clutch-relative pose mapping, YAM inverse kinematics, haptics, and
-camera publisher. The only external runtime asset is the i2rt YAM MJCF; set
-`YAM_XML` or place the i2rt checkout at `./i2rt`.
-
-For direct hardware teleoperation, one command starts the relay, establishes
-the Quest USB tunnel, powers the native arms, and parks them on exit:
-
-```bash
-uv run openpi teleop --arm both --open-quest \
-    --interface left=can_left \
-    --interface right=can_right
-
-uv run openpi teleop --arm right --open-quest \
-    --interface right=can_right
-```
-
-Use `--quest-transport lan` with TLS certificates for a Wi-Fi Quest session.
-Use `openpi relay` when the relay should remain running independently. The
-Quest controls are: grip to clutch, trigger to control the gripper, A/X for
-precision, thumbstick click to return one arm to rest, and B/Y for recording
-signals. Right B starts an episode and left Y saves it when using `collect` or
-`record`.
-
-The legacy `--vr-kit` option remains accepted for migration, but normal runs
-import the in-repository `vr_teleop_kit` package directly.
-
-`--teleop hold --dry-run` rehearses a whole session — arms up, cameras open,
-nothing written — so the pipeline can be checked without a headset.
-
-Note that the gripper convention is **inverted** between this package (`1.0` =
-open) and LeRobot (`0.0` = open); recorded datasets use LeRobot's, and
-`record.to_native_gripper` is the one place that converts back. That and the
-other three ways a dataset comes out quietly wrong are in
-[docs/recording.md](docs/recording.md).
-
-## Visualizing an arm
-
-`openpi_control.viz` serves any packaged model in the browser with
-[viser](https://viser.studio). It opens no bus and starts no native node, so it
-runs with the hardware down or absent.
-
-```bash
-uv run openpi-control-viz --fetch-meshes --model Yam     # once, needs network
-uv run openpi-control-viz --model Yam --effector E_Yam   # http://localhost:8080
-```
-
-The wheel ships each URDF but not its meshes — the URDFs are here for the
-gravity-compensation model, which needs link inertias and joint origins and
-never needs geometry. `--fetch-meshes` caches I2RT's YAM meshes (MIT) under
-`~/openpi-data/meshes/`, after which every run renders the real arm offline with
-no flags. Without them you get a kinematic skeleton built from the joint
-origins, which needs no assets at all.
-
-GUI sliders drive the joints. To follow a live arm instead, hand it poses from
-your own session — the visualizer only draws, so hardware stays your call:
-
-```python
-from openpi_control.viz import ArmVisualizer
-
-viz = ArmVisualizer("Yam", effector_model="E_Yam")
-viz.update(follower.read_state().joints.position_rad)
-```
-
-`ArmSceneVisualizer` puts several arms in one scene, each with its own base
-pose. Pass it a packaged rig to draw a whole cell:
-
-```bash
-uv run openpi-control-viz --rig yam_bimanual   # both arms, sliders, no bus
-```
-
-To mirror two *live* arms instead of sliders, use `openpi live` — it
-owns the power-on and power-off that a live view implies. See
-[docs/viser.md](docs/viser.md).
-
-## Documentation
-
-| Doc | Covers |
-| --- | --- |
-| [docs/cli.md](docs/cli.md) | `doctor` checks, `zero` safeguards, rigs, `live` power on/off |
-| [docs/cameras.md](docs/cameras.md) | camera identity, discovery, the two D405 serials, capture rates |
-| [docs/recording.md](docs/recording.md) | LeRobot datasets, VR teleop, gripper polarity, episode boundaries |
-| [docs/safety.md](docs/safety.md) | Shared runtime checks, stop conditions, and shutdown behavior |
-| [docs/inference.md](docs/inference.md) | MolmoAct2 HTTP inference, action chunks, and hardware execution |
-| [docs/dagger.md](docs/dagger.md) | human-in-the-loop recording, the handoff buttons, the `intervention` column |
-| [docs/viser.md](docs/viser.md) | render modes, mesh sourcing, rigs, joint ordering |
-| [docs/fr3.md](docs/fr3.md) | FR3 firmware, networking, controller, validation |
-| [docs/yam_teaching_handle.md](docs/yam_teaching_handle.md) | YAM handle CAN protocol and trigger calibration |
-
-## Building from source
-
-Building requires CMake and a C++17 compiler. The dependency builder pins and
-builds Pinocchio, ZeroMQ, cppzmq, Trossen, libfranka 0.21.3, and libmodbus;
-the resulting libfranka and libmodbus archives are linked into
-`pi_control_node`. It has been tested on Ubuntu 22.04 and 24.04.
+Ubuntu Linux, USB 3 for RealSense, Python 3.12 or 3.13. Install
+[uv](https://docs.astral.sh/uv/getting-started/installation/), then:
 
 ```bash
 sudo ./scripts/install_build_deps_ubuntu.sh
 ./scripts/build_deps.sh
-uv build --wheel
+UV_HTTP_TIMEOUT=180 uv sync --locked
+uv run karma --help
 ```
 
-The wheel is written to `dist/`.
+The first sync downloads the complete runtime (LeRobot, PyTorch CPU wheels,
+camera SDK, VR packages) and builds the native `pi_control_node`. No sibling
+repository or `PYTHONPATH` is needed. If your shell exports a ROS `PYTHONPATH`,
+run Karma with `env -u PYTHONPATH uv run karma ...`.
+
+USB access and the Quest:
+
+```bash
+sudo usermod -aG dialout,video "$USER"       # log out and back in afterwards
+sudo apt-get install adb
+sudo install -m 0644 scripts/udev/51-meta-quest.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+```
+
+Enable developer mode and USB debugging on the Quest, reconnect it, accept the
+headset's prompt; `adb devices` must report `device`.
+
+## 1. YAM (bimanual or single arm)
+
+Full walkthrough with CAN pinning, zeros and troubleshooting: [YAM setup](docs/yam-setup.md).
+
+### Once: i2rt files, CAN buses, meshes
+
+Quest teleop's IK loads the YAM MJCF from an [i2rt](https://github.com/i2rt-robotics/i2rt)
+checkout (not vendored); clone it inside the Karma checkout, where it is found
+automatically and git-ignored. Fetch the browser meshes once too:
+
+```bash
+git clone https://github.com/i2rt-robotics/i2rt.git
+uv run karma-viz --fetch-meshes --model Yam
+```
+
+Each arm is one USB‑CAN adapter. Bring the buses up at 1 Mbit/s and check the arms:
+
+```bash
+ls -l /sys/class/net/can*
+sudo ip link set can0 up type can bitrate 1000000
+sudo ip link set can1 up type can bitrate 1000000
+uv run karma doctor --rig yam_bimanual
+```
+
+`can0`/`can1` follow USB enumeration order, so either pin names with a udev rule
+(see the setup doc) or pass `--interface left=BUS --interface right=BUS` on every
+command. YAM uses firmware motor zeros and the packaged instance configuration;
+there is no calibration JSON. Only write zeros at the manufacturer's mechanical
+zero pose (`karma zero ... --dry-run` first).
+
+### Cameras
+
+| Role | Camera | Placement |
+| --- | --- | --- |
+| `top` | RealSense D435 | Fixed overhead, both arms' shared workspace |
+| `left_wrist` | RealSense D405 | Left wrist, looking at the grasp |
+| `right_wrist` | RealSense D405 | Right wrist, looking at the grasp |
+
+```bash
+uv run python -c 'import pyrealsense2 as rs; print([(d.get_info(rs.camera_info.name), d.get_info(rs.camera_info.serial_number)) for d in rs.context().query_devices()])'
+uv run karma cameras --rig yam_bimanual \
+  --camera-serial top=TOP_SERIAL \
+  --camera-serial left_wrist=LEFT_WRIST_SERIAL \
+  --camera-serial right_wrist=RIGHT_WRIST_SERIAL --probe
+```
+
+### Teleop: both arms or one
+
+```bash
+# both arms
+uv run karma teleop --rig yam_bimanual \
+  --interface left=can0 --interface right=can1 --open-quest
+
+# one arm: same rig, one Quest hand, only that bus is opened
+uv run karma teleop --rig yam_bimanual --arm right --interface right=can0 --open-quest
+uv run karma teleop --rig yam_bimanual --arm left  --interface left=can0  --open-quest
+```
+
+In VR: hold grip to clutch, trigger for the gripper, thumbstick click returns to
+rest. Ctrl+C parks then de-energizes (`--no-park` skips the parking move).
+
+### Demonstrations
+
+```bash
+uv run karma teleop --record --rig yam_bimanual \
+  --interface left=can0 --interface right=can1 \
+  --camera-serial top=TOP_SERIAL \
+  --camera-serial left_wrist=LEFT_WRIST_SERIAL \
+  --camera-serial right_wrist=RIGHT_WRIST_SERIAL \
+  --repo-id local/yam-demo --task "fold the towel" --fps 30 --open-quest
+```
+
+Single-arm recording: add `--arm right` and declare only `top` and `right_wrist`.
+
+### Policy: inference, rollout, HITL
+
+Start the YAM MolmoAct2 server on the GPU host first (port 8202, norm tag
+`yam_dual_molmoact2`; see [Model servers](docs/model-servers.md)). The client
+checks the server's health contract before energizing anything. The bimanual
+checkpoint needs both arms and all three views.
+
+```bash
+# Continuous run, one instruction
+uv run karma inference --rig yam_bimanual \
+  --interface left=can0 --interface right=can1 \
+  --camera-serial top=TOP_SERIAL \
+  --camera-serial left_wrist=LEFT_WRIST_SERIAL \
+  --camera-serial right_wrist=RIGHT_WRIST_SERIAL \
+  --server http://GPU_HOST:8202 --norm-tag yam_dual_molmoact2 \
+  --instruction "fold the towel"
+
+# Timed episodes, task asked per episode, saved as a LeRobot v3 dataset
+uv run karma rollout --rig yam_bimanual \
+  --interface left=can0 --interface right=can1 \
+  --camera-serial top=TOP_SERIAL \
+  --camera-serial left_wrist=LEFT_WRIST_SERIAL \
+  --camera-serial right_wrist=RIGHT_WRIST_SERIAL \
+  --server http://GPU_HOST:8202 --norm-tag yam_dual_molmoact2 \
+  --repo-id local/yam-rollouts --episodes 10 --episode-seconds 30 --fps 30
+
+# DAgger: policy drives, Right B takes over, Left Y tap hands back / hold ends
+uv run karma hitl --rig yam_bimanual \
+  --interface left=can0 --interface right=can1 \
+  --camera-serial top=TOP_SERIAL \
+  --camera-serial left_wrist=LEFT_WRIST_SERIAL \
+  --camera-serial right_wrist=RIGHT_WRIST_SERIAL \
+  --server http://GPU_HOST:8202 --norm-tag yam_dual_molmoact2 \
+  --repo-id local/yam-dagger --episodes 10 --episode-seconds 30 --fps 30 --open-quest
+```
+
+## 2. SO100 / SO101
+
+### Browser view
+
+Every SO101 command that opens Viser draws the real arm once its meshes are
+cached (otherwise a skeleton and a `visual meshes not cached` warning):
+
+```bash
+uv run karma-viz --fetch-meshes --model SO101
+uv run karma-viz --rig so101          # hardware-free viewer with sliders
+```
+
+### Calibrate each arm
+
+Every SO101 arm gets its own profile from the calibration wizard (torque off,
+mid-travel centring, full sweep, closed/open gripper, home pose):
+
+```bash
+uv run karma calibrate-so101 --interface /dev/ttyACM0 \
+  --output calibration/so101-right.json --center-encoders
+```
+
+Repeat per arm. The `calibration/` directory is ignored by Git — back it up
+yourself. Details in [SO101 setup](docs/so101-teleop.md).
+
+### Cameras: RealSense or webcams
+
+Only `top` is declared by default; add views by role. The SO100/SO101 MolmoAct2
+checkpoint uses `top` and `side`. With RealSense, pass serials; with USB webcams,
+pass device paths (find the capture node of each with `ls -l /dev/v4l/by-path/`):
+
+```bash
+# RealSense
+uv run karma cameras --rig so101 --camera-serial top=TOP_SERIAL --camera-serial side=SIDE_SERIAL --probe
+# USB webcams (OpenCV)
+uv run karma cameras --rig so101 --camera top=/dev/video5 --camera side=/dev/video7 --probe --snapshot /tmp/cams
+```
+
+`--probe` opens each camera, measures the delivered rate and (with `--snapshot`)
+writes a frame per view so you can check framing.
+
+### Teleop and demonstrations
+
+```bash
+uv run karma teleop --rig so101 \
+  --interface right=/dev/ttyACM0 --calibration right=calibration/so101-right.json \
+  --rate 50 --open-quest
+
+uv run karma teleop --record --rig so101 \
+  --interface right=/dev/ttyACM0 --calibration right=calibration/so101-right.json \
+  --camera top=/dev/video5 --camera side=/dev/video7 \
+  --repo-id local/so101-demo --task "pick up the object" --fps 30 --open-quest
+```
+
+Bimanual: `--rig so101_bimanual --interface left=/dev/ttyACM1 --interface right=/dev/ttyACM0`
+with a `--calibration` per arm.
+
+### Policy frame for the public checkpoint (work in progress)
+
+Karma's policy wire is calibrated **radians** with a mid-travel zero and a
+0=open gripper. The public `allenai/MolmoAct2-SO100_101` checkpoint was trained
+on LeRobot **v1** datasets: **degrees**, zero at LeRobot's "arm straight out"
+pose, gripper 0–100. Feeding it radians, or executing its degrees as radians,
+drives the arm into its limits. The `--policy-frame` file bridges the two and is
+captured once per arm with two reference poses:
+
+```bash
+uv run karma so101-policy-frame --interface /dev/ttyACM0 \
+  --calibration calibration/so101-right.json \
+  --output calibration/so101-right.policy-frame.json
+```
+
+**Status: work in progress.** The capture works and the maths is tested against
+LeRobot's own calibration formula, but the result depends on how precisely the
+two poses are held; in practice the wrist-roll offset needed a manual correction
+against the checkpoint's rest state. Importing a LeRobot calibration file
+instead of posing is planned. Read [Inference › Policy frames](docs/inference.md#policy-frames)
+before running the policy, and verify the mapped rest pose against the
+checkpoint's before energizing.
+
+### Policy: inference, rollout, HITL
+
+Start the SO100 MolmoAct2 server on the GPU host (port 8203, norm tag
+`so100_so101_molmoact2`, two cameras `top_cam`/`side_cam`; see
+[Model servers](docs/model-servers.md)).
+
+```bash
+# Continuous run, one instruction
+uv run karma inference --rig so101 \
+  --interface right=/dev/ttyACM0 --calibration right=calibration/so101-right.json \
+  --policy-frame calibration/so101-right.policy-frame.json \
+  --camera top=/dev/video5 --camera side=/dev/video7 \
+  --server http://GPU_HOST:8203 --norm-tag so100_so101_molmoact2 \
+  --speed 0.5 --instruction "pick up the object"
+
+# Timed episodes, task asked per episode, recorded
+uv run karma rollout --rig so101 \
+  --interface right=/dev/ttyACM0 --calibration right=calibration/so101-right.json \
+  --policy-frame calibration/so101-right.policy-frame.json \
+  --camera top=/dev/video5 --camera side=/dev/video7 \
+  --server http://GPU_HOST:8203 --norm-tag so100_so101_molmoact2 \
+  --repo-id local/so101-rollouts --episodes 5 --episode-seconds 30 --fps 30 --speed 0.5
+
+# DAgger with Quest takeover
+uv run karma hitl --rig so101 \
+  --interface right=/dev/ttyACM0 --calibration right=calibration/so101-right.json \
+  --policy-frame calibration/so101-right.policy-frame.json \
+  --camera top=/dev/video5 --camera side=/dev/video7 \
+  --server http://GPU_HOST:8203 --norm-tag so100_so101_molmoact2 \
+  --repo-id local/so101-dagger --episodes 10 --episode-seconds 30 --fps 30 \
+  --speed 0.5 --open-quest
+```
+
+For a checkpoint you trained on Karma's own recordings, drop `--policy-frame`
+and use that checkpoint's norm tag. `--speed 0.5` plays each chunk at half the
+training rate for first runs; `--max-step-rad` bounds any single tick.
+
+## Policy and data contract
+
+A checkpoint must match the rig's arm count, joint order, camera roles, units
+and gripper polarity; the YAM checkpoint is not an SO101 policy and vice versa.
+[Inference](docs/inference.md) documents the HTTP contract, the health check
+and the policy-frame mechanism; [Model servers](docs/model-servers.md) what each
+server must expose; [Recording](docs/recording.md) the LeRobot v3 schema and
+[DAgger](docs/dagger.md) the intervention workflow. Karma collects data; training
+runs in your MolmoAct2 environment.
+
+## Documentation
+
+| Document | Covers |
+| --- | --- |
+| [Commands](docs/cli.md) | Every `karma` subcommand and the shared flags |
+| [Cameras](docs/cameras.md) | RealSense and OpenCV capture, roles, probing, troubleshooting |
+| [Inference](docs/inference.md) | Policy contract, HTTP payload, health check, policy frames |
+| [Model servers](docs/model-servers.md) | The YAM and SO100 MolmoAct2 servers Karma connects to |
+| [YAM setup](docs/yam-setup.md) | CAN buses, zeros, home, teaching handle |
+| [SO101 setup](docs/so101-teleop.md) | Calibration wizard, teleop, IK tuning, Quest troubleshooting |
+| [Recording](docs/recording.md) | LeRobot v3 dataset schema |
+| [DAgger](docs/dagger.md) | HITL workflow and intervention labels |
+| [Safety](docs/safety.md) | Preflight and runtime checks |
+| [Viser](docs/viser.md) | Browser visualization |
+
+## Acknowledgements
+
+Karma builds on [openpi-basic-control](https://github.com/Physical-Intelligence/openpi-basic-control)
+by Physical Intelligence (the control stack, native runtime, models and policy
+client this repository grew out of) and on
+[vr-teleop-kit](https://github.com/Dream-Machines-Robotics/vr-teleop-kit) by
+Dream Machines (the Quest teleoperation runtime vendored under
+`src/vr_teleop_kit/`, Apache 2.0). The SO101 arm description is
+[SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100) by The Robot Studio;
+the YAM models, MJCF and meshes come from [i2rt](https://github.com/i2rt-robotics/i2rt).
+See [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md).
+
+## Repository map
+
+| Path | Purpose |
+| --- | --- |
+| `src/openpi_control/` | Karma CLI, hardware sessions, policy client, cameras, recording, calibration |
+| `src/vr_teleop_kit/` | Bundled Quest WebXR client, relay and IK |
+| `native/pi_control/` | C++ CAN/FeeTech control and safety |
+| `src/openpi_control/models/` | YAM and SO101 arm/effector models |
+| `calibration/` | Local per-arm profiles, policy frames and firmware backups (ignored) |
+| `scripts/` | Native dependency build and USB setup |
+| `docs/` | Hardware, camera, policy and data documentation |
+| `tests/` | Hardware-free tests |
+
+Logs go to `logs/` (`KARMA_LOG_DIR` overrides). Run tests with
+`uv run --extra dev pytest`. Physical calibration, camera placement and a
+checkpoint trained for your rig still need validation on your workstation.

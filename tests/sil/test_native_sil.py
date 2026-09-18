@@ -509,15 +509,20 @@ def test_gripper_stops_are_measured_at_startup_past_one_feedback_turn(fake_bus_w
         state = follower.read_state(timeout_s=20.0)
         assert state.effector is not None
 
+        # After the probe the node holds the gripper in position mode, so a
+        # plain set_position() is teleported straight back by the next MIT
+        # frame. "The jaws physically sit here" is what set_stuck() models:
+        # the motor ignores commands and reports that position.
+        #
         # Normalized 1.0 now means the measured open stop, not a configured
         # 4.5 rad that the real travel runs past.
-        fake_bus_with_gripper.set_position(7, -6.57)
+        fake_bus_with_gripper.set_stuck(7, -6.57)
         wait_for(
             lambda: follower.read_state(timeout_s=2.0).effector.position > 0.97,
             timeout_s=5.0,
             what="the measured open stop to report fully open",
         )
-        fake_bus_with_gripper.set_position(7, 0.0)
+        fake_bus_with_gripper.set_stuck(7, 0.0)
         wait_for(
             lambda: follower.read_state(timeout_s=2.0).effector.position < 0.03,
             timeout_s=5.0,
@@ -526,7 +531,7 @@ def test_gripper_stops_are_measured_at_startup_past_one_feedback_turn(fake_bus_w
 
         # Mid-travel lands where the measured stroke says it should, not where
         # the configured 4.5 rad would have put it.
-        fake_bus_with_gripper.set_position(7, -3.285)
+        fake_bus_with_gripper.set_stuck(7, -3.285)
         wait_for(
             lambda: abs(follower.read_state(timeout_s=2.0).effector.position - 0.5) < 0.05,
             timeout_s=5.0,
@@ -535,6 +540,7 @@ def test_gripper_stops_are_measured_at_startup_past_one_feedback_turn(fake_bus_w
 
         # And a close command has to actually drive toward the closed stop --
         # the whole symptom was a gripper that never closed.
+        fake_bus_with_gripper.clear_stuck(7)
         follower.command(PositionCommand(state.joints.position_rad, 0.0))
         wait_for(
             lambda: abs(fake_bus_with_gripper.position(7)) < 0.5,

@@ -94,7 +94,7 @@ def test_the_teaching_handle_encoder_is_read_only() -> None:
 
 
 def test_plan_is_ordered_by_joint_id() -> None:
-    for model in ("Yam", "ARX_X5", "Trossen_wai_ctrl"):
+    for model in ("Yam", "SO101"):
         ids = [entry.joint_id for entry in cli.build_plan(model)]
         assert ids == sorted(ids), model
 
@@ -115,11 +115,13 @@ def test_a_servo_without_a_model_is_rejected(tmp_path) -> None:
         cli.servo_entries(catalog, "arm")
 
 
-def test_a_read_only_arm_has_no_bus_to_open() -> None:
-    """ARX_ENC is a leader-only encoder arm: nothing to zero."""
-    plan = cli.build_plan("ARX_ENC")
-    assert all(entry.read_only for entry in plan)
-    assert cli.plan_port_type(plan) is None
+# Commented out: exercises ARX/FR3/encoder-only hardware removed when Karma was
+# focused on YAM and SO101 (commit 26363d5). Kept for reference.
+# def test_a_read_only_arm_has_no_bus_to_open() -> None:
+#     """ARX_ENC is a leader-only encoder arm: nothing to zero."""
+#     plan = cli.build_plan("ARX_ENC")
+#     assert all(entry.read_only for entry in plan)
+#     assert cli.plan_port_type(plan) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -165,16 +167,20 @@ def test_doctor_flags_an_uncached_mesh_directory(no_mesh_cache) -> None:
     assert "--fetch-meshes" in meshes_check.detail
 
 
-def test_doctor_warns_when_a_model_ships_no_urdf(no_mesh_cache) -> None:
-    results = cli.run_doctor("FR3", "192.168.1.10")
-    assert _by_name(results, "urdf").status == cli._WARN
+# Commented out: exercises ARX/FR3/encoder-only hardware removed when Karma was
+# focused on YAM and SO101 (commit 26363d5). Kept for reference.
+# def test_doctor_warns_when_a_model_ships_no_urdf(no_mesh_cache) -> None:
+#     results = cli.run_doctor("FR3", "192.168.1.10")
+#     assert _by_name(results, "urdf").status == cli._WARN
 
 
-def test_doctor_reports_a_read_only_arm_has_nothing_to_zero(no_mesh_cache) -> None:
-    results = cli.run_doctor("ARX_ENC", "can0")
-    bus_type = _by_name(results, "bus type")
-    assert bus_type.status == cli._WARN
-    assert "nothing to zero" in bus_type.detail
+# Commented out: exercises ARX/FR3/encoder-only hardware removed when Karma was
+# focused on YAM and SO101 (commit 26363d5). Kept for reference.
+# def test_doctor_reports_a_read_only_arm_has_nothing_to_zero(no_mesh_cache) -> None:
+#     results = cli.run_doctor("ARX_ENC", "can0")
+#     bus_type = _by_name(results, "bus type")
+#     assert bus_type.status == cli._WARN
+#     assert "nothing to zero" in bus_type.detail
 
 
 def test_doctor_exit_code_is_nonzero_only_on_failure(capsys, no_mesh_cache) -> None:
@@ -215,11 +221,13 @@ def test_zero_reports_an_unacknowledged_servo(fake_bus) -> None:
     assert all(error == "no acknowledgement" for _, error in outcomes)
 
 
-def test_zero_on_a_read_only_arm_writes_nothing(fake_bus) -> None:
-    bus = fake_bus()
-    outcomes = cli.zero_arm(cli.build_plan("ARX_ENC"), buses.PORT_TYPE_CAN, "can0")
-    assert outcomes == []
-    assert bus.sent == []
+# Commented out: exercises ARX/FR3/encoder-only hardware removed when Karma was
+# focused on YAM and SO101 (commit 26363d5). Kept for reference.
+# def test_zero_on_a_read_only_arm_writes_nothing(fake_bus) -> None:
+#     bus = fake_bus()
+#     outcomes = cli.zero_arm(cli.build_plan("ARX_ENC"), buses.PORT_TYPE_CAN, "can0")
+#     assert outcomes == []
+#     assert bus.sent == []
 
 
 def test_dry_run_touches_no_bus(monkeypatch, capsys) -> None:
@@ -666,7 +674,7 @@ def fake_camera_bus(monkeypatch, tmp_path):
 def test_camera_checks_pass_when_every_declared_camera_is_present(
     fake_camera_bus,
 ) -> None:
-    fake_camera_bus(["348523020354", "254623070863", "254623070417"])
+    fake_camera_bus(["000000000001", "000000000002", "000000000003"])
 
     results = cli.run_camera_checks(resolve_rig("yam_bimanual"))
 
@@ -682,7 +690,7 @@ def test_camera_checks_pass_when_every_declared_camera_is_present(
 def test_a_missing_camera_only_warns_for_doctor(fake_camera_bus) -> None:
     # Cameras are not needed to drive an arm, so an unplugged wrist camera must
     # not stop `doctor` from green-lighting the cell.
-    fake_camera_bus(["348523020354"])
+    fake_camera_bus(["000000000001"])
 
     results = cli.run_camera_checks(resolve_rig("yam_bimanual"))
 
@@ -695,18 +703,18 @@ def test_a_missing_camera_only_warns_for_doctor(fake_camera_bus) -> None:
 def test_a_missing_camera_is_fatal_when_the_caller_needs_it(fake_camera_bus) -> None:
     # The recorder passes required=True: writing an episode with a view
     # silently absent is worse than refusing to start.
-    fake_camera_bus(["348523020354"])
+    fake_camera_bus(["000000000001"])
 
     results = cli.run_camera_checks(resolve_rig("yam_bimanual"), required=True)
 
     assert sum(1 for r in results if r.status == cli._FAIL) == 2
-    assert any("254623070863" in r.detail for r in results)
+    assert any("000000000002" in r.detail for r in results)
 
 
 def test_camera_checks_flag_a_camera_the_rig_does_not_know(fake_camera_bus) -> None:
     # The useful half of "the top view is missing" is usually "and here is the
     # serial of the camera that replaced it".
-    fake_camera_bus(["348523020354", "254623070863", "254623070417", "999999999999"])
+    fake_camera_bus(["000000000001", "000000000002", "000000000003", "999999999999"])
 
     results = cli.run_camera_checks(resolve_rig("yam_bimanual"))
 
@@ -716,7 +724,7 @@ def test_camera_checks_flag_a_camera_the_rig_does_not_know(fake_camera_bus) -> N
 
 
 def test_narrowing_to_one_arm_stops_checking_the_other_wrist(fake_camera_bus) -> None:
-    fake_camera_bus(["348523020354", "254623070417"])
+    fake_camera_bus(["000000000001", "000000000003"])
 
     results = cli.run_camera_checks(resolve_rig("yam_bimanual").subset(["right"]))
 
@@ -737,7 +745,7 @@ def test_a_rig_with_no_cameras_says_so_instead_of_passing_vacuously(
 
 
 def test_the_cameras_command_exits_nonzero_only_on_a_failure(fake_camera_bus, capsys) -> None:
-    fake_camera_bus(["348523020354"])
+    fake_camera_bus(["000000000001"])
 
     # Two cameras missing, but missing is a warning here, so this still passes.
     assert cli.main(["cameras"]) == 0
@@ -747,7 +755,7 @@ def test_the_cameras_command_exits_nonzero_only_on_a_failure(fake_camera_bus, ca
 def test_pinning_a_camera_to_a_device_that_is_not_there_is_reported(
     fake_camera_bus, tmp_path, capsys
 ) -> None:
-    fake_camera_bus(["348523020354", "254623070863", "254623070417"])
+    fake_camera_bus(["000000000001", "000000000002", "000000000003"])
 
     cli.main(["cameras", "--camera", f"top={tmp_path / 'nope'}"])
 
@@ -760,7 +768,7 @@ def test_a_snapshot_without_a_probe_is_refused_before_anything_opens(
     fake_camera_bus, tmp_path
 ) -> None:
     # --snapshot alone would silently do nothing; saying so beats an empty dir.
-    fake_camera_bus(["348523020354"])
+    fake_camera_bus(["000000000001"])
 
     with pytest.raises(ConfigurationError, match="needs --probe"):
         cli._command_cameras(
@@ -778,7 +786,7 @@ def test_a_snapshot_without_a_probe_is_refused_before_anything_opens(
 def test_doctor_on_a_rig_reports_its_cameras(fake_camera_bus, no_mesh_cache, capsys) -> None:
     # Cameras belong to the rig, not to an arm, so they are checked once rather
     # than repeated under every arm.
-    fake_camera_bus(["348523020354", "254623070863", "254623070417"])
+    fake_camera_bus(["000000000001", "000000000002", "000000000003"])
 
     cli.main(["doctor", "--rig", "yam_bimanual"])
 
@@ -841,7 +849,7 @@ def test_record_preflight_treats_a_missing_camera_as_fatal(
     monkeypatch.setattr(cli, "check_camera_modes", lambda rig: [])
     # Unlike `doctor`, recording with a view silently absent produces a dataset
     # that is wrong rather than a cell that is merely unchecked.
-    fake_camera_bus(["348523020354"])  # top only; both wrists missing
+    fake_camera_bus(["000000000001"])  # top only; both wrists missing
 
     status = cli.main(["record", "--dry-run", "--task", "t"])
 
@@ -851,7 +859,7 @@ def test_record_preflight_treats_a_missing_camera_as_fatal(
 
 
 def test_record_narrows_cameras_with_only(fake_camera_bus, monkeypatch, capsys) -> None:
-    fake_camera_bus(["348523020354", "254623070417"])
+    fake_camera_bus(["000000000001", "000000000003"])
     seen: dict[str, object] = {}
 
     def fake_run(rig, **kwargs):

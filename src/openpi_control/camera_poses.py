@@ -1,9 +1,7 @@
-"""Calibrated camera extrinsics used by the bimanual scene visualizer.
+"""Camera transforms and a nominal overhead pose for visualization.
 
-The supplied calibration script defines a transform from the top camera frame
-into the midpoint frame between the two arm bases. Keeping the matrix here
-makes that convention explicit and lets Viser show the calibrated camera frame
-without changing the image bytes sent to the policy server.
+The default is illustrative, not a physical camera calibration. It does not
+change the image bytes sent to the policy server.
 """
 
 from __future__ import annotations
@@ -154,22 +152,15 @@ class CameraExtrinsic:
         )
 
 
-# Generated from the supplied camera-pose-bimanual.py calibration. It maps
-# points in the camera frame into the bimanual midpoint frame, in metres.
-T_MIDPOINT_FROM_TOP_CAMERA = np.array(
-    [
-        [0.999986716, -0.004210873, -0.002972762, 0.013927329],
-        [-0.003082845, -0.950802809, 0.309781399, -0.007471385],
-        [-0.004130961, -0.309768119, -0.950803159, 0.889581466],
-        [0.0, 0.0, 0.0, 1.0],
-    ],
-    dtype=np.float64,
-)
+# Nominal camera one metre above the midpoint, looking straight down.
+# Supply a workstation-specific CameraExtrinsic on the rig for calibrated views.
+T_MIDPOINT_FROM_TOP_CAMERA = np.diag([1.0, -1.0, -1.0, 1.0])
+T_MIDPOINT_FROM_TOP_CAMERA[2, 3] = 1.0
 
 YAM_TOP_CAMERA_EXTRINSIC = CameraExtrinsic.from_matrix(
     "top", "midpoint", T_MIDPOINT_FROM_TOP_CAMERA
 )
 
-# The inverse printed by the calibration script: it maps midpoint-frame
+# The inverse maps midpoint-frame
 # points into the top-camera frame.
 T_TOP_CAMERA_FROM_MIDPOINT = YAM_TOP_CAMERA_EXTRINSIC.inverse_matrix

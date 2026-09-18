@@ -37,8 +37,6 @@ add_executable(pi_control_tests
   test_servo_dm_status.cpp
   test_servo_turn_tracking.cpp
   test_driver_base.cpp
-  test_fr3_controller.cpp
-  test_robotiq.cpp
   ${PI_CONTROL_ROOT}/src/can/math_ops.cpp
   ${PI_CONTROL_ROOT}/src/pi_filter.cpp
   ${PI_CONTROL_ROOT}/src/pi_stall_detect.cpp
@@ -48,7 +46,6 @@ add_executable(pi_control_tests
   ${PI_CONTROL_ROOT}/src/pi_driver_can.cpp
   ${PI_CONTROL_ROOT}/src/pi_servo_dm_status.cpp
   ${PI_CONTROL_ROOT}/src/pi_info.cpp
-  ${PI_CONTROL_ROOT}/src/pi_fr3_controller.cpp
 )
 target_include_directories(pi_control_tests PRIVATE ${PI_CONTROL_ROOT}/include)
 target_compile_features(pi_control_tests PRIVATE cxx_std_17)

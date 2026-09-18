@@ -91,6 +91,14 @@ def joint_limits(rig: Rig) -> dict[str, tuple[np.ndarray, np.ndarray]]:
             or np.any(values[:, 0] >= values[:, 1])
         ):
             raise ConfigurationError(f"invalid joint limits in {path}")
+        if arm.model == "SO101" and arm.calibration_file is not None:
+            from .so101_calibration import load_profile
+
+            instance = load_profile(arm.calibration_file)["arm_instance"]
+            for i, joint in enumerate(instance["joints"]):
+                servo = joint["servos"][0]
+                values[i, 0] = max(values[i, 0], servo["pos_min"])
+                values[i, 1] = min(values[i, 1], servo["pos_max"])
         result[arm.name] = (values[:, 0], values[:, 1])
     return result
 

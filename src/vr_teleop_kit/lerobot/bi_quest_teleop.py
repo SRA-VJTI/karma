@@ -2,12 +2,12 @@
 
 Subscribes to a relay-mode FastAPI server's `/ws` and reads `xr_frame`
 broadcasts (controller poses + buttons + headset pose). Per arm,
-maintains a `ClutchPoseMapper` and a `DecoupledIKSolver`; on the rising edge
+maintains a `ClutchPoseMapper` and a model-specific IK solver; on the rising edge
 of the grip button, captures the engage frame and starts running
 differential IK each tick. `get_action()` returns a joint action dict
-for a bimanual YAM follower:
+for YAM (six joints) or SO101 (five joints), selected by `robot_model`:
 
-    {left,right}_joint_{1..6}.pos   (radians)
+    {left,right}_joint_{1..N}.pos   (radians; N=6 for YAM, N=5 for SO101)
     {left,right}_gripper.pos        (normalized 0..1)
 
 Standard LeRobot-style loop:
@@ -75,7 +75,6 @@ except ImportError as e:  # pragma: no cover
 
 from ..core.pose_mapping import ClutchPoseMapper
 from ..ik.decoupled_ik import DecoupledIKSolver
-from ..ik.model import DEFAULT_Q_REST
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +140,7 @@ class BiQuestTeleoperatorConfig(TeleoperatorConfig):
     server so the existing viewer_client.py + Quest UI keep mirroring.
     `connect_timeout_s` bounds connect()'s wait for the WS handshake.
 
-    `rest_qpos_left` / `rest_qpos_right` are six joint angles (rad) per arm.
+    `rest_qpos_left` / `rest_qpos_right` are model-sized joint angles (rad).
     They serve two roles: (a) the teleop initialises each arm's qpos here
     so the first `send_action` moves the physical follower toward the
     rest pose; (b) the IK Tikhonov bias pulls toward this pose, breaking
@@ -158,12 +157,15 @@ class BiQuestTeleoperatorConfig(TeleoperatorConfig):
     # back to the YAM_XML environment variable, then an ./i2rt clone in
     # the working directory / repo root (see ik/model.py).
     model_path: str = ""
+    robot_model: str = "Yam"
+    joint_limits_left: list[list[float]] | None = None
+    joint_limits_right: list[list[float]] | None = None
     # 3x3 rotation (row-major) taking Quest world vectors into the arm
     # base frame. See DEFAULT_R_CALIB above for the convention and the
     # README for how to re-derive it for a different mounting.
     r_calib: list[list[float]] = field(default_factory=lambda: [row[:] for row in DEFAULT_R_CALIB])
-    rest_qpos_left: list[float] = field(default_factory=lambda: DEFAULT_Q_REST.tolist())
-    rest_qpos_right: list[float] = field(default_factory=lambda: DEFAULT_Q_REST.tolist())
+    rest_qpos_left: list[float] | None = None
+    rest_qpos_right: list[float] | None = None
 
     # IK / mapping knobs.
     lam: float = 0.05  # Position-solve base damping
@@ -188,14 +190,14 @@ class BiQuestTeleoperatorConfig(TeleoperatorConfig):
     # stops and less posture windup near gimbal; larger = more headroom for
     # very fast motions before absorption. 0 disables either reach limit.
     rot_reach_limit: float = 0.6  # rad (~34°)
-    pos_reach_limit: float = 0.25  # m
+    pos_reach_limit: float | None = None  # m
     # Solver backstop: park the wrist when the orientation error exceeds
     # this (rad). With the reach limit on it never fires; exposed mainly so the
     # no-limit comparison demo can disable it (> 3.15 = off, since the
     # error angle can't exceed π) and show the raw absolute-mapping flip
     # at 180°.
     rot_err_hold: float = 2.2
-    scale_translation: float = 1.5  # controller→EE translation gain
+    scale_translation: float | None = None  # controller→EE translation gain
     scale_rotation: float = 1.5  # controller→EE rotation gain (<1 = softer)
     # While the A/X precision button is held, both scale_translation and
     # scale_rotation are multiplied by this factor for finer positioning.
@@ -216,16 +218,14 @@ class BiQuestTeleoperatorConfig(TeleoperatorConfig):
     # 0.24 rad/tick (48 rad/s @ 200 Hz). The wrist needs the higher cap: at
     # 0.06 it felt sluggish and held wrist motion back during fine tasks, so
     # rotation is set 4x higher than position.
-    max_dq_per_joint: list[float] | None = field(
-        default_factory=lambda: [0.06, 0.06, 0.06, 0.24, 0.24, 0.24]
-    )
+    max_dq_per_joint: list[float] | None = field(default_factory=list)
     # Web-tunable shortcuts. Writing either through `config_update` (a)
     # rebuilds `max_dq_per_joint = [pos]*3 + [rot]*3` and (b) pushes the
     # new array into each live DecoupledIKSolver, so a slider drag takes
     # effect on the very next solve. Initial values mirror the per-joint
     # default above; not used as a source-of-truth after that.
-    max_dq_per_joint_scalar_pos: float = 0.06
-    max_dq_per_joint_scalar_rot: float = 0.24  # 4x position (48 rad/s @ 200 Hz)
+    max_dq_per_joint_scalar_pos: float | None = None
+    max_dq_per_joint_scalar_rot: float | None = None  # 4x position (48 rad/s @ 200 Hz)
     # ── Force haptic (gripper torque → controller vibration) ──
     # Linear scaling with a dead zone:
     #   intensity = clip((|τ| - threshold) / (max - threshold), 0, 1)
@@ -258,6 +258,27 @@ class BiQuestTeleoperatorConfig(TeleoperatorConfig):
     # the operator's hand motion resumes with zero delta — no jump.
     rest_ramp_duration_s: float = 2.0
 
+    def __post_init__(self):
+        so101 = self.robot_model == "SO101"
+        dofs = 5 if so101 else 6
+        for hand in ("left", "right"):
+            key = f"rest_qpos_{hand}"
+            if getattr(self, key) is None:
+                setattr(self, key, [0.0] * dofs)
+        if self.max_dq_per_joint_scalar_pos is None:
+            self.max_dq_per_joint_scalar_pos = 0.02 if so101 else 0.06
+        if self.max_dq_per_joint_scalar_rot is None:
+            self.max_dq_per_joint_scalar_rot = 0.02 if so101 else 0.24
+        if self.max_dq_per_joint == []:
+            self.max_dq_per_joint = (
+                [self.max_dq_per_joint_scalar_pos] * 3
+                + [self.max_dq_per_joint_scalar_rot] * (dofs - 3)
+            )
+        if self.scale_translation is None:
+            self.scale_translation = 0.5 if so101 else 1.5
+        if self.pos_reach_limit is None:
+            self.pos_reach_limit = 0.05 if so101 else 0.25
+
 
 class BiQuestTeleoperator(Teleoperator):
     config_class = BiQuestTeleoperatorConfig
@@ -266,6 +287,10 @@ class BiQuestTeleoperator(Teleoperator):
     def __init__(self, config: BiQuestTeleoperatorConfig) -> None:
         super().__init__(config)
         self.config = config
+        if config.robot_model not in ("Yam", "SO101"):
+            raise ValueError(f"unsupported Quest robot model: {config.robot_model}")
+        self.arm_dofs = 5 if config.robot_model == "SO101" else 6
+        self.nq = 6 if config.robot_model == "SO101" else 8
 
         self._r_calib = np.asarray(config.r_calib, dtype=float)
         if self._r_calib.shape != (3, 3):
@@ -287,29 +312,45 @@ class BiQuestTeleoperator(Teleoperator):
             "right": np.asarray(config.rest_qpos_right, dtype=float),
         }
         for hand, q in rest_qpos.items():
-            if q.shape != (ARM_DOFS,):
+            if q.shape != (self.arm_dofs,) or not np.all(np.isfinite(q)):
                 raise ValueError(
-                    f"rest_qpos_{hand} must have {ARM_DOFS} values, got shape {q.shape}"
+                    f"rest_qpos_{hand} must have {self.arm_dofs} values, got shape {q.shape}"
                 )
 
         self._arms: dict[str, dict] = {}
         for hand in ("left", "right"):
             q_rest = rest_qpos[hand]
-            qpos_init = np.zeros(NQ)
-            qpos_init[:ARM_DOFS] = q_rest
-            arm_solver = DecoupledIKSolver(
-                model_path=config.model_path or None,
-                lam_pos=config.lam,
-                lam0=config.lam0,
-                w0=config.w0,
-                mu=config.mu,
-                lam_rot=config.lam_rot,
-                lam0_rot=config.lam0_rot,
-                w0_rot=config.w0_rot,
-                rot_err_hold=config.rot_err_hold,
-                q_rest=q_rest.copy(),
-                max_dq_per_joint=config.max_dq_per_joint,
-            )
+            qpos_init = np.zeros(self.nq)
+            qpos_init[:self.arm_dofs] = q_rest
+            if config.robot_model == "SO101":
+                from ..ik.so101_ik import SO101IKSolver
+
+                arm_solver = SO101IKSolver(max_dq_per_joint=config.max_dq_per_joint)
+                custom_limits = getattr(config, f"joint_limits_{hand}")
+                if custom_limits is not None:
+                    bounds = np.asarray(custom_limits, dtype=float)
+                    if bounds.shape != (5, 2) or not np.all(np.isfinite(bounds)):
+                        raise ValueError("SO101 calibrated limits must be a finite 5x2 array")
+                    arm_solver.lower = np.maximum(arm_solver.lower, bounds[:, 0])
+                    arm_solver.upper = np.minimum(arm_solver.upper, bounds[:, 1])
+                    if np.any(arm_solver.lower >= arm_solver.upper):
+                        raise ValueError("SO101 calibration has empty joint limits")
+                if np.any(q_rest < arm_solver.lower) or np.any(q_rest > arm_solver.upper):
+                    raise ValueError(f"SO101 {hand} rest pose is outside joint limits")
+            else:
+                arm_solver = DecoupledIKSolver(
+                    model_path=config.model_path or None,
+                    lam_pos=config.lam,
+                    lam0=config.lam0,
+                    w0=config.w0,
+                    mu=config.mu,
+                    lam_rot=config.lam_rot,
+                    lam0_rot=config.lam0_rot,
+                    w0_rot=config.w0_rot,
+                    rot_err_hold=config.rot_err_hold,
+                    q_rest=q_rest.copy(),
+                    max_dq_per_joint=config.max_dq_per_joint,
+                )
             self._arms[hand] = {
                 "solver": arm_solver,
                 "mapper": ClutchPoseMapper(
@@ -345,7 +386,7 @@ class BiQuestTeleoperator(Teleoperator):
                 # the next operator motion has zero delta — no jump.
                 "last_rest_button": False,
                 "ramp_active": False,
-                "ramp_start_q": np.zeros(ARM_DOFS),
+                "ramp_start_q": np.zeros(self.arm_dofs),
                 "ramp_target_q": q_rest.copy(),
                 "ramp_start_t": 0.0,
             }
@@ -389,7 +430,7 @@ class BiQuestTeleoperator(Teleoperator):
     def action_features(self) -> dict[str, type]:
         feats: dict[str, type] = {}
         for hand in ("left", "right"):
-            for j in range(1, ARM_DOFS + 1):
+            for j in range(1, self.arm_dofs + 1):
                 feats[f"{hand}_joint_{j}.pos"] = float
             feats[f"{hand}_gripper.pos"] = float
         return feats
@@ -628,21 +669,32 @@ class BiQuestTeleoperator(Teleoperator):
         ``left_gripper.pos``, …); missing keys are silently skipped.
         """
         with self._lock:
+            # Validate every side before mutating either solver. This must run
+            # before the first idle action too: native clipping of an invalid
+            # measured pose could otherwise move the arm before clutching.
+            seeds = {}
             for hand in ("left", "right"):
                 arm = self._arms[hand]
-                for j in range(ARM_DOFS):
-                    key = f"{hand}_joint_{j + 1}.pos"
-                    if key in obs:
-                        arm["qpos"][j] = float(obs[key])
+                q = np.array([
+                    float(obs.get(f"{hand}_joint_{j + 1}.pos", arm["qpos"][j]))
+                    for j in range(self.arm_dofs)
+                ])
+                if self.config.robot_model == "SO101":
+                    try:
+                        q = arm["solver"].validate_seed(q)
+                    except ValueError as err:
+                        raise ValueError(f"{hand}: {err}") from err
+                seeds[hand] = q
+            for hand in ("left", "right"):
+                arm = self._arms[hand]
+                arm["qpos"][:self.arm_dofs] = seeds[hand]
                 # Gripper: store as `trigger` (used by `_build_action`)
                 # and also mirror into the sim-viewer qpos slots.
                 gkey = f"{hand}_gripper.pos"
                 if gkey in obs:
                     g = float(np.clip(obs[gkey], 0.0, 1.0))
                     arm["trigger"] = g
-                    grip_qpos = GRIPPER_QPOS_OPEN + g * (GRIPPER_QPOS_CLOSED - GRIPPER_QPOS_OPEN)
-                    arm["qpos"][6] = grip_qpos
-                    arm["qpos"][7] = grip_qpos
+                    self._mirror_gripper(arm, g)
                 # Cancel any in-flight go-home rest ramp: it has no
                 # ``engaged`` guard, so a ramp started before the handoff
                 # would keep overwriting ``qpos[:6]`` and clobber the seed
@@ -708,7 +760,7 @@ class BiQuestTeleoperator(Teleoperator):
         out: dict[str, float] = {}
         for hand in ("left", "right"):
             arm = self._arms[hand]
-            for j in range(ARM_DOFS):
+            for j in range(self.arm_dofs):
                 out[f"{hand}_joint_{j + 1}.pos"] = float(arm["qpos"][j])
             # LeRobot follower convention: gripper.pos in [0, 1] (0=open, 1=closed).
             # Our trigger is already 0..1 with the same polarity.
@@ -819,7 +871,7 @@ class BiQuestTeleoperator(Teleoperator):
         )
         if rest_btn and not arm["last_rest_button"] and not arm["ramp_active"]:
             target = self.config.rest_qpos_left if hand == "left" else self.config.rest_qpos_right
-            arm["ramp_start_q"] = arm["qpos"][:ARM_DOFS].copy()
+            arm["ramp_start_q"] = arm["qpos"][:self.arm_dofs].copy()
             arm["ramp_target_q"] = np.asarray(target, dtype=float)
             arm["ramp_start_t"] = time.perf_counter()
             arm["ramp_active"] = True
@@ -900,9 +952,7 @@ class BiQuestTeleoperator(Teleoperator):
         # trigger pressure outside an active intervention.
         if arm["engaged"]:
             arm["trigger"] = trigger
-            grip_qpos = GRIPPER_QPOS_OPEN + trigger * (GRIPPER_QPOS_CLOSED - GRIPPER_QPOS_OPEN)
-            arm["qpos"][6] = grip_qpos
-            arm["qpos"][7] = grip_qpos
+            self._mirror_gripper(arm, trigger)
 
         # Per-arm "go home" ramp owns qpos while active: linearly interpolate
         # qpos[:6] from start → rest target over rest_ramp_duration_s, then
@@ -914,7 +964,7 @@ class BiQuestTeleoperator(Teleoperator):
             duration = max(1e-3, float(self.config.rest_ramp_duration_s))
             elapsed = time.perf_counter() - arm["ramp_start_t"]
             t = min(1.0, elapsed / duration)
-            arm["qpos"][:ARM_DOFS] = arm["ramp_start_q"] + t * (
+            arm["qpos"][:self.arm_dofs] = arm["ramp_start_q"] + t * (
                 arm["ramp_target_q"] - arm["ramp_start_q"]
             )
             if t >= 1.0:
@@ -936,7 +986,7 @@ class BiQuestTeleoperator(Teleoperator):
         out = arm["mapper"].target(pos, quat_wxyz, ee_pos_now, ee_quat_now)
         if out is not None:
             tgt_pos, tgt_quat = out
-            arm["qpos"][:ARM_DOFS] = arm["solver"].solve(tgt_pos, tgt_quat, arm["qpos"])
+            arm["qpos"][:self.arm_dofs] = arm["solver"].solve(tgt_pos, tgt_quat, arm["qpos"])
 
             # Haptic feedback: take the max of four signals, all 0..1.
             #  (a) limit_pressure (rad): joints clipped into their stops
@@ -969,13 +1019,24 @@ class BiQuestTeleoperator(Teleoperator):
             # linger after the operator releases the grip.
             arm["haptic"] *= 0.6
 
+    def _mirror_gripper(self, arm, trigger):
+        if self.config.robot_model == "SO101":
+            # One normalized closure value, not YAM's two simulated sliders.
+            arm["qpos"][self.arm_dofs:] = trigger
+        else:
+            arm["qpos"][self.arm_dofs:] = (
+                GRIPPER_QPOS_OPEN + trigger * (GRIPPER_QPOS_CLOSED - GRIPPER_QPOS_OPEN)
+            )
+
     def _publish_ik_state_async(self) -> None:
         """Schedule an ik_state send on the WS asyncio loop. Called from the
         LeRobot thread, executed on the WS thread."""
         payload = {
             "type": "ik_state",
-            "left_qpos": [float(v) for v in self._arms["left"]["qpos"][:NQ]],
-            "right_qpos": [float(v) for v in self._arms["right"]["qpos"][:NQ]],
+            "robot_model": self.config.robot_model,
+            "arm_dofs": self.arm_dofs,
+            "left_qpos": [float(v) for v in self._arms["left"]["qpos"][:self.nq]],
+            "right_qpos": [float(v) for v in self._arms["right"]["qpos"][:self.nq]],
             "left_engaged": bool(self._arms["left"]["engaged"]),
             "right_engaged": bool(self._arms["right"]["engaged"]),
             # Haptic intensity (0..1) per arm — the EMA'd max of the IK
@@ -993,7 +1054,7 @@ class BiQuestTeleoperator(Teleoperator):
             # Compatibility shim for the existing viewer_client.py/Quest UI
             # which read `qpos` (single arm) — surface the right arm here so
             # things keep rendering until those clients learn the new schema.
-            "qpos": [float(v) for v in self._arms["right"]["qpos"][:NQ]],
+            "qpos": [float(v) for v in self._arms["right"]["qpos"][:self.nq]],
             "engaged": bool(self._arms["right"]["engaged"]),
             # Which teleop instance produced this state. Lets passive
             # listeners (viewer_client --from-id) pick one stream when
@@ -1052,6 +1113,16 @@ class BiQuestTeleoperator(Teleoperator):
     # `false` (or `1` / `0`) and the field is set directly.
     _LIVE_CONFIG_BOOLS: tuple[str, ...] = ("force_haptic_enabled",)
 
+    def _settings_profile(self):
+        return {
+            "type": "request_settings",
+            "robot_model": self.config.robot_model,
+            "config": {
+                key: getattr(self.config, key)
+                for key in (*self._LIVE_CONFIG_BOUNDS, *self._LIVE_CONFIG_BOOLS)
+            },
+        }
+
     def _apply_config_update(self, cfg: dict) -> None:
         """Apply a `config_update` payload from the web UI. Mutates
         `self.config` in place under the WS lock so the per-tick read picks
@@ -1085,7 +1156,7 @@ class BiQuestTeleoperator(Teleoperator):
             if "max_dq_per_joint_scalar_pos" in applied or "max_dq_per_joint_scalar_rot" in applied:
                 pos = float(self.config.max_dq_per_joint_scalar_pos)
                 rot = float(self.config.max_dq_per_joint_scalar_rot)
-                arr = [pos] * 3 + [rot] * 3
+                arr = [pos] * 3 + [rot] * (self.arm_dofs - 3)
                 self.config.max_dq_per_joint = arr
                 for hand in ("left", "right"):
                     solver = self._arms[hand].get("solver")
@@ -1281,7 +1352,7 @@ class BiQuestTeleoperator(Teleoperator):
                     # the web client responds with a `config_update`. No-op
                     # if no page is connected yet (the relay just drops it).
                     try:
-                        await ws.send(json.dumps({"type": "request_settings"}))
+                        await ws.send(json.dumps(self._settings_profile()))
                     except Exception as e:
                         logger.debug("request_settings send failed: %s", e)
                     async for raw in ws:
@@ -1317,7 +1388,12 @@ class BiQuestTeleoperator(Teleoperator):
                                 self._latest_xr_frame = msg
                                 self._last_xr_frame_time = time.time()
                                 self._buttons = btn_snapshot
+                        elif mtype == "request_settings":
+                            if "robot_model" not in msg:
+                                await ws.send(json.dumps(self._settings_profile()))
                         elif mtype == "config_update":
+                            if msg.get("robot_model", "Yam") != self.config.robot_model:
+                                continue
                             # Live-tunable knobs from the web UI. Mutate the
                             # config dataclass in place under the same lock the
                             # tick reads; the per-tick path reads `self.config.*`

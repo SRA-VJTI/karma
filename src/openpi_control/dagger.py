@@ -46,7 +46,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .inference import MOLMOACT_ARM_NAMES
 from .record import ArmTarget, EpisodeEvent, TeleopSource, TeleopStep
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -200,9 +199,7 @@ class DaggerSource(TeleopSource):
             # on this tick, exactly as the clock's own expiry: the arms hold
             # their last command until the runner parks them.
             self._saved = True
-            self._say(
-                f"■  EPISODE ENDED — {self.GIVE} held; saving what was captured and parking"
-            )
+            self._say(f"■  EPISODE ENDED — {self.GIVE} held; saving what was captured and parking")
             return TeleopStep(event=EpisodeEvent.SAVE)
 
         if self._intervening:
@@ -309,7 +306,7 @@ class DaggerSource(TeleopSource):
         self._say(f"✋  HUMAN IN CONTROL — policy paused · {self.GIVE} hands it back")
 
     def _hand_back(self, states: Mapping[str, ArmState | None]) -> None:
-        fresh = {name: states.get(name) for name in MOLMOACT_ARM_NAMES}
+        fresh = dict(states)
         missing = sorted(name for name, state in fresh.items() if state is None)
         if missing:
             # Staying in human control is the safe answer. The policy's

@@ -137,16 +137,14 @@ def test_the_registry_is_keyed_by_each_rig_s_own_name() -> None:
 
 
 def test_yam_bimanual_declares_the_cell_s_three_cameras() -> None:
-    # The serials are a site fact: these are the D405s bolted to this cell, and
-    # they are what pins each view to a role. A wrong one here records the
-    # right-wrist view under the left-wrist key for every episode ever taken.
+    # Synthetic defaults require per-workstation serial overrides.
     rig = resolve_rig("yam_bimanual")
 
     assert rig.camera_names == ("top", "left_wrist", "right_wrist")
     assert {camera.name: camera.serial for camera in rig.cameras} == {
-        "top": "348523020354",  # D435; the D405 it replaced was 254623070531
-        "left_wrist": "254623070863",
-        "right_wrist": "254623070417",
+        "top": "000000000001",
+        "left_wrist": "000000000002",
+        "right_wrist": "000000000003",
     }
     # The top camera watches the cell; each wrist camera rides on an arm, which
     # is what makes `--only` able to drop it.
@@ -199,8 +197,8 @@ def test_a_rig_refuses_two_cameras_on_one_serial() -> None:
             description="",
             arms=(RigArm(name="only", model="Yam", interface="can0"),),
             cameras=(
-                RigCamera(name="top", serial="254623070531", label="A"),
-                RigCamera(name="wrist", serial="254623070531", label="B"),
+                RigCamera(name="top", serial="000000000004", label="A"),
+                RigCamera(name="wrist", serial="000000000004", label="B"),
             ),
         )
 

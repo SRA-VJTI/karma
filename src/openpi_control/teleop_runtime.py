@@ -60,17 +60,38 @@ def run_teleop(
         raise ConfigurationError("--rate must be positive")
     if max_state_age_s <= 0:
         raise ConfigurationError("max_state_age_s must be positive")
-    if any(arm.model != "Yam" for arm in rig.arms):
-        raise ConfigurationError(
-            "Quest teleoperation currently supports the packaged Yam model only; "
-            "the vendored IK is YAM-specific"
-        )
+    models = {arm.model for arm in rig.arms}
+    if len(models) != 1 or not models.issubset({"Yam", "SO101"}):
+        raise ConfigurationError("Quest teleoperation needs an all-YAM or all-SO101 rig")
+    robot_model = next(iter(models))
+    if robot_model == "SO101" and model_path:
+        raise ConfigurationError("SO101 uses its packaged URDF; --yam-xml is YAM-only")
+    if any(not arm.is_follower for arm in rig.arms):
+        raise ConfigurationError("Quest teleoperation needs follower arms only")
     if any(arm.name not in {"left", "right"} for arm in rig.arms):
         raise ConfigurationError("Quest teleoperation requires left/right arm names")
 
     # Imported lazily to keep doctor/zero usable on installations without the
     # VR optional dependencies.
     from .cli import power_down, power_up, settle_arm_states
+
+    config_overrides = dict(config_overrides or {})
+    if any(arm.calibration_file is not None for arm in rig.arms):
+        from .so101_calibration import load_profile, verify_firmware
+
+        verify_firmware(rig)
+        for arm in rig.arms:
+            if arm.calibration_file is None:
+                continue
+            instance = load_profile(arm.calibration_file)["arm_instance"]
+            config_overrides.setdefault(
+                f"rest_qpos_{arm.name}",
+                [j["servos"][0]["home_pos"] for j in instance["joints"]],
+            )
+            config_overrides[f"joint_limits_{arm.name}"] = [
+                [j["servos"][0]["pos_min"], j["servos"][0]["pos_max"]]
+                for j in instance["joints"]
+            ]
 
     stop = stop if stop is not None else threading.Event()
     limits = joint_limits(rig)
@@ -92,6 +113,7 @@ def run_teleop(
         source = QuestTeleopSource(
             tuple(arms),
             ws_url=ws_url,
+            robot_model=robot_model,
             model_path=model_path,
             config_overrides=config_overrides,
         )

@@ -13,20 +13,16 @@ plain pyserial session at the caller-provided baud rate (the model catalog's
 from __future__ import annotations
 
 import contextlib
-import ipaddress
 import pathlib
 import time
 from collections.abc import Iterator
 
 import can
 import serial as pyserial
-import trossen_arm
-
-from openpi_control.servos import trossen_eth
 
 PORT_TYPE_CAN = "can"
 PORT_TYPE_SERIAL = "serial"
-PORT_TYPE_ETHERNET = trossen_eth.PORT_TYPE
+PORT_TYPE_ETHERNET = "ethernet"
 
 _SUPPORTED_PORT_TYPES = f"{PORT_TYPE_CAN}, {PORT_TYPE_SERIAL}, {PORT_TYPE_ETHERNET}"
 
@@ -55,27 +51,13 @@ def check_interface(port_type: str, interface: str) -> str | None:
             f"serial device {interface!r} does not exist. Plug in the adapter and list "
             "the names with 'ls /dev/serial/by-id'."
         )
-    if port_type == PORT_TYPE_ETHERNET:
-        try:
-            ipaddress.IPv4Address(interface)
-        except ValueError:
-            return (
-                f"Ethernet controller address {interface!r} is not a valid IPv4 address; "
-                "check the bus entry in the config TOML (eth:<ip>)."
-            )
-        if trossen_eth.reachable(interface):
-            return None
-        return (
-            f"Ethernet controller at {interface} did not answer a discovery probe. Check the "
-            "cable and power, and that the host has an address on the controller's subnet."
-        )
     raise SystemExit(f"unknown port type {port_type!r}; supported: {_SUPPORTED_PORT_TYPES}")
 
 
 @contextlib.contextmanager
 def open_bus(
     port_type: str, interface: str, *, baudrate: int | None = None
-) -> Iterator[can.BusABC | trossen_arm.TrossenArmDriver | pyserial.Serial]:
+) -> Iterator[can.BusABC | pyserial.Serial]:
     """Open a settled bus session on ``interface`` for drivers of ``port_type``.
 
     Serial sessions require ``baudrate`` (the arm model catalog's ``baudrate``
@@ -86,12 +68,6 @@ def open_bus(
         with can.interface.Bus(channel=interface, interface="socketcan") as bus:
             time.sleep(_CAN_OPEN_SETTLE_S)
             yield bus
-        return
-    if port_type == PORT_TYPE_ETHERNET:
-        # The "bus" is the vendor driver session; ``interface`` is the
-        # controller's IPv4 address.
-        with trossen_eth.open_session(interface) as driver:
-            yield driver
         return
     if port_type == PORT_TYPE_SERIAL:
         if baudrate is None or baudrate <= 0:

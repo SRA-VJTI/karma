@@ -5,9 +5,9 @@ The relay needs three color streams pinned to fixed roles (top / left wrist
 reboot and replug, but nothing in the path says which physical camera plays
 which role — that is a site fact tied to the camera's serial number.
 
-This module owns that mapping. ``SERIAL_TO_ROLE`` below is the committed
-source of truth; override it for a different rig by pointing the ``CAM_MAP``
-env var at a JSON file of the same ``{"<serial>": "<role>"}`` shape.
+This module owns that mapping. No physical camera identities are committed.
+Point the ``CAM_MAP`` env var at an ignored local JSON file of the same
+``{"<serial>": "<role>"}`` shape.
 
 Discovery is pure filesystem enumeration (glob ``/dev/v4l/by-id``) + a serial
 lookup, so it has no dependency on ``pyrealsense2`` or ``v4l2-ctl`` and works
@@ -22,15 +22,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-# ── Site config ──────────────────────────────────────────────────────────
-# Serial number (as it appears in the by-id device path) → role. Update this
-# when you swap a camera, or set CAM_MAP=/path/to/map.json to override without
-# editing code. Roles are the canonical short names used everywhere below.
-SERIAL_TO_ROLE: dict[str, str] = {
-    "254623070531": "top",  # top-down
-    "254623070863": "left",  # left wrist
-    "254623070417": "right",  # right wrist
-}
+# Configure standalone relay roles with CAM_MAP=calibration/camera-map.json.
+SERIAL_TO_ROLE: dict[str, str] = {}
 
 # Canonical role → (env var the relay reads, camera id in the WS schema, label).
 ROLES: dict[str, tuple[str, str, str]] = {
@@ -46,7 +39,7 @@ BY_ID_DIR = Path("/dev/v4l/by-id")
 _DEFAULT_COLOR_INDEX = 4
 
 # by-id name looks like:
-#   usb-Intel_R__RealSense_..._405_..._254623070531-video-index4
+#   usb-Intel_R__RealSense_..._405_..._000000000004-video-index4
 # Capture the serial (digits before -video-index) and the node index.
 _BY_ID_RE = re.compile(r"RealSense.*?_(\d+)-video-index(\d+)$")
 

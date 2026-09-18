@@ -20,12 +20,24 @@ build/
 build*/
 dist/
 wheelhouse/
+cmake-build*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+compile_commands.json
+.ninja_deps
+.ninja_log
+*.o
+*.a
 pip-wheel-metadata/
 
 # =========================
 # Testing / linting / tools
 # =========================
 .pytest_cache/
+.hypothesis/
 .ruff_cache/
 .mypy_cache/
 .pyre/
@@ -51,6 +63,8 @@ htmlcov/
 # =========================
 .vscode/
 .idea/
+/.agents/
+/.codex/
 *.swp
 *.swo
 *~
@@ -67,12 +81,20 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+*.local
+*.local.*
+*.pem
+*.key
+*.p12
+*.pfx
 
 # =========================
 # Logs
 # =========================
 *.log
 logs/
+# Visual meshes fetched by `karma-viz --fetch-meshes` (next to logs/)
+meshes/
 
 # =========================
 # Generated data / outputs
@@ -124,3 +146,6 @@ MUJOCO_LOG.TXT
 MJMODEL.TXT
 MJDATA.TXT
 *.mjb
+
+# Calibration profiles and generated instances belong to this physical arm.
+/calibration/

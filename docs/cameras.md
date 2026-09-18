@@ -1,270 +1,101 @@
 # Cameras
 
-The bimanual cell watches itself with three Intel RealSense D405s: one overhead
-and one on each wrist. They belong to the rig, exactly like the CAN interfaces
-do, so `doctor --rig`, `cameras`, and anything that records agree on what
-`left_wrist` means.
+Karma captures RGB from two kinds of camera through one reader interface, so
+teleop recording, inference, rollout and HITL do not care which is behind a
+role:
+
+| Backend | Identity | Capture | Typical use |
+| --- | --- | --- | --- |
+| `realsense` | serial number (`--camera-serial ROLE=SERIAL`) | RealSense SDK, 848×480 @ 30 fps default | YAM cell: D435 overhead, D405 wrists |
+| `opencv` | device path (`--camera ROLE=/dev/videoN`) | `cv2.VideoCapture` over V4L2, MJPG | SO101 with ordinary USB webcams |
+
+Roles are `top`, `left_wrist`, `right_wrist` and `side`; a policy server
+receives them as `top_cam`, `left_cam`, `right_cam`, `side_cam`. Keep framing,
+rotation, exposure and lighting consistent between demonstrations and
+deployment — policy input is RGB, there is no image-space correction.
+
+## RealSense
+
+A RealSense is addressed by serial: `/dev/videoN` changes on replug, the serial
+does not. Use USB 3 and rigid mounts. Discover devices:
 
 ```bash
-uv sync
-uv run openpi-control cameras                # what is plugged in, and where
-uv run openpi-control cameras --probe        # also open each one and measure it
+uv run python -c 'import pyrealsense2 as rs; print([(d.get_info(rs.camera_info.name), d.get_info(rs.camera_info.serial_number)) for d in rs.context().query_devices()])'
 ```
 
-## A camera's identity is its serial
-
-A `/dev/videoN` number is not a camera. It changes with boot order, with which
-USB port you used, and with how many cameras came up first. So a rig pins each
-view by serial number, and `openpi_control.cameras` resolves that to a device
-at run time:
-
-| Camera | Model | Serial | Capture | Rides on | Sees |
-| --- | --- | --- | --- | --- | --- |
-| `top` | D435 | `348523020354` | 848x480@30 | — | the whole cell, from above |
-| `left_wrist` | D405 | `254623070863` | 848x480@30 | `left` | what the left gripper is about to touch |
-| `right_wrist` | D405 | `254623070417` | 848x480@30 | `right` | the same, for the right arm |
-
-The wrist serials are the ones the cell was already using — they match
-the serial map in `openpi_control.rigs`. Swap a camera and the one place to edit is
-`YAM_BIMANUAL_CAMERA_SERIALS` in `openpi_control/rigs.py`.
-
-### The top camera is a D435, and it is not interchangeable
-
-It replaced a D405 (`254623070531`), and it differs in two ways the rig has to
-carry rather than paper over:
-
-- **It publishes no serial in its USB descriptor.** Its udev names end in the
-  model number where a D405's end in the serial, and its colour node gets no
-  `/dev/v4l/by-id` entry at all. Discovery therefore falls back to
-  `sdk_present_asic_serials()` for cameras udev cannot name; the SDK addresses
-  it perfectly well, and device paths here are only ever diagnostics — a stream
-  is opened by serial. Such a camera shows up as `sdk:<sdk-serial>` in the
-  `cameras` table instead of a `/dev/...` path.
-- **It once came up on USB 2.0, and captured 640x480@30 because of it.**
-  Enumerated on 2026-08-23 it offered only 424x240, 640x480, 1280x720@15 and
-  1920x1080@8 — the reduced set a D435 falls back to on USB 2 — and a
-  `YAM_TOP_CAPTURE` override in `rigs.py` pinned it there. That is resolved:
-  re-checked on 2026-09-13 the camera offers 848x480 and 640x360 at 30 fps, so
-  it is on USB 3, the override is deleted, and the top camera takes the rig
-  default like the wrists. The top camera holds a true 30 fps at that mode.
-
-  The wrists do not, as of 2026-09-13: `openpi cameras --probe` measures
-  `left_wrist` at 4 fps and `right_wrist` at 7 fps against the same 30 fps
-  request, and warns on both. It is not the top camera's mode (the wrists
-  measure the same with `top` pinned back to 640x480), not the pixel format,
-  not co-tenancy (one wrist alone is no faster), and not auto-exposure (capping
-  the exposure makes it marginally worse). The open suspect is the USB
-  topology: `lsusb -t` puts both D405s behind two cascaded hubs on bus 8, while
-  the healthy D435 has bus 2 to itself. Try each wrist in a motherboard USB 3
-  port and re-probe before recording anything -- at 4 fps the recorder repeats
-  the last frame to fill the schema, so the dataset looks complete and is not.
-
-  The aspect ratio was the reason to bother. MolmoAct2's training frames are
-  640x360 and the D405 wrists are 848x480 — both 16:9. 640x480 was 4:3, which
-  made the top view the one input whose shape did not match what the policy was
-  trained on; at 848x480 every view the policy is handed is 16:9.
-
-  If this camera is ever moved to a USB 2 port again it will silently lose
-  848x480. `openpi-control cameras` prints the mode each camera actually came
-  up in, which is where that shows.
-
-The checkpoint itself was trained with a D435 in the top role, so the camera
-*model* is a move toward the training setup rather than away from it — note
-that the reference deployment on this cell had a D405 there
-(`front_camera: 352122273221` in `~/molmoact2/examples/yam/configs/yam_left.yaml`,
-which is the SDK serial for ASIC `254623070531`), so the reference is not the
-authority on this one.
-
-What the swap does not fix: `YAM_TOP_CAMERA_EXTRINSIC` still describes where
-the old camera sat, so the top-camera frame in the Viser scene is wrong until
-it is recalibrated. That is visualization metadata only — no capture or policy
-path reads it.
-
-Naming the arm a wrist camera rides on is what makes `--only` do the obviously
-right thing:
+Capture goes through the SDK rather than OpenCV because, measured on D405s,
+OpenCV's V4L2 path tops out around 10–13 fps at 848×480 where the SDK holds 30
+on three cameras at once. 848×480 is the D405's native colour mode; other sizes
+make the firmware rescale and cost frame rate.
 
 ```bash
-uv run openpi-control cameras --only right
-# top + right_wrist. The left wrist camera goes wherever the left arm goes.
+uv run karma cameras --rig yam_bimanual \
+  --camera-serial top=TOP_SERIAL \
+  --camera-serial left_wrist=LEFT_SERIAL \
+  --camera-serial right_wrist=RIGHT_SERIAL --probe
 ```
 
-Recording a left-wrist view of an arm that was never powered would put the same
-frozen frame in every step of the dataset, so the camera is dropped rather than
-left in.
+The packaged YAM serials are placeholders for the original workstation; pass
+your own. `--camera ROLE=/dev/videoN` on a RealSense role pins discovery to a
+device path for diagnosis; the stream is still opened by serial.
 
-### The two serial numbers of a D405
+## USB webcams (OpenCV)
 
-A D405 answers to two different numbers, which is worth knowing before you go
-looking for one of them:
-
-| Number | Example | Where you see it |
-| --- | --- | --- |
-| ASIC serial | `254623070531` | `/dev/v4l/by-id`, the USB descriptor, `cams.env`, this rig |
-| SDK serial | `352122273221` | `pyrealsense2`'s `serial_number`, and nothing else |
-
-Rigs declare the ASIC serial, because that is the one you can look up with
-`ls /dev/v4l/by-id` on a box with no SDK installed. `sdk_serial_for_asic()`
-bridges to the other one when a stream actually opens. If you ever see "no
-RealSense with ASIC serial … is connected" while `rs-enumerate-devices` clearly
-lists three cameras, this is why.
-
-## Discovery needs nothing installed
-
-Answering "is the top camera plugged in" is pure filesystem work — glob
-`/dev/v4l/by-id`, read the serial out of each entry's name, keep the colour
-node. No SDK, no OpenCV. That is deliberate: `doctor` has to be able to tell you
-a camera fell off its mount on a machine that cannot open a camera at all.
-
-```
-uv run openpi-control doctor --rig yam_bimanual
-...
-cameras (3 declared):
-  [OK  ] camera top                 848x480@30 — /dev/v4l/by-id/usb-Intel_R_...-video-index4
-  [WARN] camera left_wrist          serial 254623070863 not on the bus
-  [OK  ] camera right_wrist         848x480@30 — /dev/v4l/by-id/usb-Intel_R_...-video-index4
-```
-
-A missing camera is a warning here, not a failure: none of them are needed to
-drive an arm, and `doctor` should not refuse to green-light a cell because
-someone unplugged a wrist camera to work on it. A recorder asks the same
-function with `required=True`, where a missing view really is fatal.
-
-A camera that is on the bus but in no rig is reported too — that is usually the
-informative half of "the top view is missing":
-
-```
-  [WARN] unclaimed cameras          serial(s) 254623070987 present but in no rig
-                                    camera — add them to YAM_BIMANUAL_CAMERA_SERIALS
-```
-
-## `--probe` opens them
-
-`--probe` starts each stream, waits for a frame, lets it settle, then counts
-frames for two seconds. `--snapshot DIR` writes what it grabbed, which is the
-fastest way to check where a wrist camera is actually pointing:
+A UVC webcam has no serial Karma can key on, so its identity is the device
+path. On a role with no RealSense serial (every SO101 role by default),
+`--camera ROLE=/dev/videoN` declares an OpenCV camera; leave `--camera-serial`
+out for that role. Find the capture node of each camera — the `index0` node,
+not the metadata node — and keep the cameras on the same USB ports:
 
 ```bash
-uv run openpi-control cameras --probe --snapshot /tmp/cams
+ls -l /dev/v4l/by-path/
+uv run karma cameras --rig so101 \
+  --camera top=/dev/video5 --camera side=/dev/video7 --probe --snapshot /tmp/cams
 ```
 
-```
-  [OK  ] probe top                  848x480 bgr8, 30 fps (asked 30) -> /tmp/cams/top.png
-  [OK  ] probe left_wrist           848x480 bgr8, 30 fps (asked 30) -> /tmp/cams/left_wrist.png
-  [OK  ] probe right_wrist          848x480 bgr8, 30 fps (asked 30) -> /tmp/cams/right_wrist.png
-```
+The reader asks V4L2 for MJPG at the rig's size and rate, which is what lifts a
+typical webcam from ~10 fps (raw YUYV over USB 2) to its advertised rate. The
+webcam negotiates the nearest mode it offers — a 640×480 camera asked for
+848×480 delivers 640×480 — and the probe reports what it settled on. Frames are
+never rescaled: a policy trained on one framing should not silently get a
+stretched version of another. Latest-frame-wins, one consumer per device, same
+as the SDK reader.
 
-Cameras are opened one at a time, so the useful error — "this camera is held by
-something else" — is not hidden behind two others complaining about USB
-bandwidth. A camera can only be streamed by one process at a time: a recorder
-and a browser preview cannot both have it.
+`karma doctor --rig` does not take camera roles; `karma cameras` is the camera
+preflight, and the policy commands run the same checks before energizing.
 
-## In the browser
+## Rigs and roles
 
-`live` puts the same cameras on the viser page as the arms, one tile each under
-**Cameras**, which is the fastest way to check where a wrist is pointing while
-you drive it:
+- **YAM** declares `top`, `left_wrist`, `right_wrist`; the checkpoint expects all
+  three in that order.
+- **SO101** declares only `top`. Add `side` (the SO100/SO101 checkpoint's second
+  fixed view) or the arm's wrist with `--camera-serial` or `--camera`. A
+  single-arm rig accepts only its own wrist role.
+- Plain teleop needs no cameras. Recording can use `--no-cameras` for
+  state-only diagnostics; policy inference requires at least `top`.
 
-```bash
-uv run openpi-control live --rig yam_bimanual --control
-uv run openpi-control live --no-cameras       # leave them free for a recorder
-```
+`--probe` opens cameras one at a time, waits for the first frame, measures the
+delivered rate over a window and, with `--snapshot DIR`, writes `ROLE.png`. A
+declared policy camera that is missing fails startup. A missing YAM wrist must
+not be substituted with the top image — that changes the checkpoint's
+observation.
 
-A tile is a preview, not a recording: 400 px wide at 10 Hz, against the 30 Hz
-the poses go out at. Pushing three 848x480 streams whole on the mirror clock
-would be ~35 MB/s of websocket to answer a question a thumbnail answers. A
-camera that is unplugged, or held by another process, is named on stdout and
-simply gets no tile — see [Cameras in the browser](cli.md#cameras-in-the-browser).
+## Troubleshooting
 
-`CameraPanel` in `openpi_control.viz` is the panel itself, and it takes readers
-that are *already open* — it never opens one. That is what keeps `viz` drawing
-and holding no device, so it stays importable on a box with no RealSense SDK:
+- *Device or resource busy*: another process holds the camera (RealSense
+  Viewer, a browser preview, a previous run still closing). A camera opens
+  once; the relay and recorder share readers during collection/HITL.
+- *Low measured fps on a webcam*: check `v4l2-ctl -d /dev/videoN
+  --list-formats-ext` offers MJPG at that size; USB 2 hubs shared between two
+  cameras halve the budget; dim scenes make auto-exposure drop the rate.
+- *Wrong camera on a role*: the `by-path` symlinks tell you which physical port
+  each node is on; snapshots tell you which is which.
+- Optional rotation and capture size live in the rig's `RigCamera` definition.
+  Camera extrinsics only affect visualization metadata.
 
-```python
-from openpi_control.viz import CameraPanel
+## Local configuration
 
-panel = CameraPanel(scene.server, readers)   # readers from open_readers()
-while running:
-    panel.step(dt)                           # throttles itself internally
-```
-
-## Two measurements worth knowing
-
-Both of these were measured on this cell, and both are the reason the defaults
-are what they are.
-
-**848x480, not 640x480.** 848x480 is the D405's native colour mode. Asking for
-640x480 makes the firmware rescale, and that is not free:
-
-| Mode | Three cameras at once |
-| --- | --- |
-| 848x480 | 30, 30, 29.5 fps |
-| 640x480 | 20, 17, 15 fps |
-
-If a policy wants a different size, crop or resize downstream — far cheaper
-there than in the camera.
-
-**848x480 also runs at 90 fps.** Every mode up to 848x480 offers 5/15/30/60/90;
-only 1280x720 caps at 30. All three cameras hold a true 90 fps concurrently
-(~220 MB/s over the shared USB 3 uplink, no drops). The rig declares 30 because
-that is the sane default for a dataset, and a run overrides it —
-`Rig.with_camera_capture(fps=..., pixel_format=...)`, which is what
-`openpi-control record --fps 90` does. `cameras.supported_color_modes(serial)`
-lists what a given camera offers without opening a stream.
-
-**The SDK, not OpenCV.** Capture goes through `pyrealsense2`. Reading the same
-colour node through `cv2.VideoCapture` tops out around 10–13 fps, while
-`v4l2-ctl` streams that node at a clean 30 — so the ceiling is in OpenCV's UVC
-consumer, not in the camera, the cable, or the bus (all three cameras are on
-USB 3 links here). Through the SDK all three hold a full 90 fps concurrently.
-OpenCV is still a dependency, but only to encode snapshots.
-
-If you record through some other tool, check its real frame rate before
-trusting the fps in its metadata.
-
-## Overriding a camera
-
-`--camera NAME=DEVICE` pins one camera to an explicit device, the camera
-equivalent of `--interface ARM=IFACE`:
-
-```bash
-uv run openpi-control cameras --camera top=/dev/video4
-```
-
-A pinned path that does not exist is reported as missing rather than quietly
-falling back to whatever discovery found — an operator who names a device meant
-that one. A name that is not in the rig is an error, not a no-op.
-
-Two per-camera fields exist for mechanical facts rather than flags:
-
-| Field | For |
-| --- | --- |
-| `rotate` (0/90/180/270) | a camera mounted sideways; applied in the capture thread so every consumer sees the corrected frame |
-| `color_index` | a RealSense model whose colour stream is not on v4l2 node 4 (it is, on a D405) |
-
-## Reading frames yourself
-
-```python
-from openpi_control.cameras import discover, open_readers, close_readers
-from openpi_control.rigs import resolve_rig
-
-rig = resolve_rig("yam_bimanual")
-found = discover(rig.cameras)
-if not found.complete:
-    raise SystemExit(f"not on the bus: {found.missing}")
-
-readers = open_readers(found.specs())
-try:
-    for name, reader in readers.items():
-        frame = reader.wait_for_frame()      # BGR, HxWx3 uint8
-        print(name, frame.shape, reader.negotiated)
-finally:
-    close_readers(readers)
-```
-
-`latest()` is latest-frame-wins: a control loop wants the freshest image at the
-moment it asks, never a backlog that grows whenever the consumer falls behind.
-It returns `None` until the first frame lands, which is what `wait_for_frame`
-is for — start writing before then and every episode gets a hole at the front.
-
-`open_readers` opens all of them or none. A half-open camera set is how you end
-up with a dataset that is quietly missing a view.
+Packaged serials are synthetic placeholders. Keep local camera maps and
+calibration under the ignored `calibration/` directory. The standalone relay
+accepts `CAM_MAP=calibration/camera-map.json`, a JSON object mapping serials to
+`top`, `left` or `right`.

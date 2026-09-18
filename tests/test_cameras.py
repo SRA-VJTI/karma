@@ -34,14 +34,14 @@ def camera(name, serial, **kwargs):
 
 
 def test_present_serials_keys_every_node_by_serial_and_index(tmp_path) -> None:
-    by_id = fake_by_id(tmp_path, ["254623070531", "254623070863"])
+    by_id = fake_by_id(tmp_path, ["000000000004", "000000000002"])
 
     nodes = present_serials(by_id)
 
     # Both cameras, all six nodes each -- the caller picks the colour one.
     assert len(nodes) == 12
-    assert ("254623070531", DEFAULT_COLOR_INDEX) in nodes
-    assert nodes[("254623070863", 0)].endswith("video-index0")
+    assert ("000000000004", DEFAULT_COLOR_INDEX) in nodes
+    assert nodes[("000000000002", 0)].endswith("video-index0")
 
 
 def test_present_serials_is_empty_when_udev_published_nothing(tmp_path) -> None:
@@ -51,8 +51,8 @@ def test_present_serials_is_empty_when_udev_published_nothing(tmp_path) -> None:
 
 
 def test_discovery_matches_each_camera_to_its_colour_node(tmp_path) -> None:
-    by_id = fake_by_id(tmp_path, ["254623070531", "254623070863"])
-    cameras = [camera("top", "254623070531"), camera("left_wrist", "254623070863")]
+    by_id = fake_by_id(tmp_path, ["000000000004", "000000000002"])
+    cameras = [camera("top", "000000000004"), camera("left_wrist", "000000000002")]
 
     result = discover(cameras, by_id_dir=by_id)
 
@@ -65,24 +65,24 @@ def test_discovery_matches_each_camera_to_its_colour_node(tmp_path) -> None:
 def test_discovery_reports_a_camera_that_is_not_on_the_bus(tmp_path) -> None:
     # The serial is carried into the report because that is the number an
     # operator needs to go looking for the camera that fell off.
-    by_id = fake_by_id(tmp_path, ["254623070531"])
+    by_id = fake_by_id(tmp_path, ["000000000004"])
 
     result = discover(
-        [camera("top", "254623070531"), camera("right_wrist", "254623070417")],
+        [camera("top", "000000000004"), camera("right_wrist", "000000000003")],
         by_id_dir=by_id,
     )
 
     assert not result.complete
-    assert result.missing == {"right_wrist": "254623070417"}
+    assert result.missing == {"right_wrist": "000000000003"}
     assert set(result.matched) == {"top"}
 
 
 def test_discovery_reports_a_camera_nobody_claimed(tmp_path) -> None:
     # This is the informative half of "the top view is missing": a camera was
     # swapped, and the new serial has to reach the rig definition.
-    by_id = fake_by_id(tmp_path, ["254623070531", "999999999999"])
+    by_id = fake_by_id(tmp_path, ["000000000004", "999999999999"])
 
-    result = discover([camera("top", "254623070531")], by_id_dir=by_id)
+    result = discover([camera("top", "000000000004")], by_id_dir=by_id)
 
     assert result.unclaimed == ("999999999999",)
 
@@ -90,21 +90,21 @@ def test_discovery_reports_a_camera_nobody_claimed(tmp_path) -> None:
 def test_a_camera_on_a_different_colour_node_is_not_matched(tmp_path) -> None:
     # A model whose colour stream is not on index 4 must say so; silently
     # matching some other node would record depth as if it were colour.
-    by_id = fake_by_id(tmp_path, ["254623070531"], indices=[0, 1])
+    by_id = fake_by_id(tmp_path, ["000000000004"], indices=[0, 1])
 
-    assert discover([camera("top", "254623070531")], by_id_dir=by_id).missing
+    assert discover([camera("top", "000000000004")], by_id_dir=by_id).missing
     assert discover(
-        [camera("top", "254623070531", color_index=1)], by_id_dir=by_id
+        [camera("top", "000000000004", color_index=1)], by_id_dir=by_id
     ).complete
 
 
 def test_an_override_wins_over_discovery(tmp_path) -> None:
-    by_id = fake_by_id(tmp_path, ["254623070531"])
+    by_id = fake_by_id(tmp_path, ["000000000004"])
     pinned = tmp_path / "video99"
     pinned.touch()
 
     result = discover(
-        [camera("top", "254623070531")],
+        [camera("top", "000000000004")],
         overrides={"top": str(pinned)},
         by_id_dir=by_id,
     )
@@ -116,22 +116,22 @@ def test_an_override_wins_over_discovery(tmp_path) -> None:
 def test_an_override_pointing_at_nothing_is_reported_not_ignored(tmp_path) -> None:
     # Falling back to the discovered device would hand the operator a camera
     # they did not ask for, which is worse than saying the pin is broken.
-    by_id = fake_by_id(tmp_path, ["254623070531"])
+    by_id = fake_by_id(tmp_path, ["000000000004"])
 
     result = discover(
-        [camera("top", "254623070531")],
+        [camera("top", "000000000004")],
         overrides={"top": str(tmp_path / "absent")},
         by_id_dir=by_id,
     )
 
-    assert result.missing == {"top": "254623070531"}
+    assert result.missing == {"top": "000000000004"}
     assert not result.matched
 
 
 def test_an_override_for_an_unknown_camera_names_the_ones_that_exist(tmp_path) -> None:
     with pytest.raises(ConfigurationError, match="top"):
         discover(
-            [camera("top", "254623070531")],
+            [camera("top", "000000000004")],
             overrides={"tpo": "/dev/video4"},
             by_id_dir=fake_by_id(tmp_path, []),
         )
@@ -140,12 +140,12 @@ def test_an_override_for_an_unknown_camera_names_the_ones_that_exist(tmp_path) -
 def test_a_found_camera_carries_the_serial_and_capture_settings(tmp_path) -> None:
     # The SDK addresses a device by serial, so a spec that lost it cannot be
     # opened at all -- the device path alone is not enough.
-    by_id = fake_by_id(tmp_path, ["254623070531"])
-    declared = camera("top", "254623070531", rotate=180, fps=15)
+    by_id = fake_by_id(tmp_path, ["000000000004"])
+    declared = camera("top", "000000000004", rotate=180, fps=15)
 
     spec = discover([declared], by_id_dir=by_id).matched["top"].spec()
 
-    assert spec.serial == "254623070531"
+    assert spec.serial == "000000000004"
     assert (spec.name, spec.rotate, spec.fps) == ("top", 180, 15)
     assert (spec.width, spec.height) == (DEFAULT_WIDTH, DEFAULT_HEIGHT)
     assert spec.fps != DEFAULT_FPS  # the declared override survived
@@ -160,13 +160,13 @@ def test_a_camera_rejects_a_serial_that_is_not_one() -> None:
 
 def test_a_camera_rejects_a_rotation_it_cannot_apply() -> None:
     with pytest.raises(ConfigurationError, match="rotate=45"):
-        camera("top", "254623070531", rotate=45)
+        camera("top", "000000000004", rotate=45)
 
 
 @pytest.mark.parametrize("bad", [{"width": 0}, {"height": -1}, {"fps": 0}])
 def test_a_camera_rejects_a_nonsense_capture_size(bad) -> None:
     with pytest.raises(ConfigurationError, match="positive"):
-        camera("top", "254623070531", **bad)
+        camera("top", "000000000004", **bad)
 
 
 @pytest.mark.parametrize(
@@ -241,19 +241,19 @@ def test_a_camera_udev_cannot_name_is_found_through_the_sdk(tmp_path, monkeypatc
     """
     from openpi_control import cameras as cameras_mod
 
-    by_id = fake_by_id(tmp_path, ["254623070863"])
+    by_id = fake_by_id(tmp_path, ["000000000002"])
     # The real system directory is what enables the SDK fallback; a redirected
     # bus is taken literally, so point BY_ID_DIR at the fake and pass no dir.
     monkeypatch.setattr(cameras_mod, "BY_ID_DIR", by_id)
     monkeypatch.setattr(cameras_mod, "SYSTEM_BY_ID_DIR", by_id)
     monkeypatch.setattr(
-        cameras_mod, "sdk_present_asic_serials", lambda: {"348523020354": "243622071623"}
+        cameras_mod, "sdk_present_asic_serials", lambda: {"000000000001": "000000000005"}
     )
 
-    result = discover([camera("top", "348523020354"), camera("left_wrist", "254623070863")])
+    result = discover([camera("top", "000000000001"), camera("left_wrist", "000000000002")])
 
     assert result.complete
-    assert result.matched["top"].device == "sdk:243622071623"
+    assert result.matched["top"].device == "sdk:000000000005"
     assert result.matched["left_wrist"].device.endswith("video-index4")
     assert result.unclaimed == ()
 
@@ -271,6 +271,62 @@ def test_a_redirected_bus_is_taken_literally(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(cameras_mod, "sdk_present_asic_serials", _boom)
 
-    result = discover([camera("top", "348523020354")], by_id_dir=fake_by_id(tmp_path, []))
+    result = discover([camera("top", "000000000001")], by_id_dir=fake_by_id(tmp_path, []))
 
-    assert result.missing == {"top": "348523020354"}
+    assert result.missing == {"top": "000000000001"}
+
+
+# --------------------------------------------------------------------------- #
+# OpenCV (plain UVC webcam) backend
+# --------------------------------------------------------------------------- #
+
+
+def webcam(name, device, **kwargs):
+    return RigCamera(name=name, serial="0", label=name, backend="opencv", device=device, **kwargs)
+
+
+def test_a_webcam_needs_a_device_path_and_ignores_the_serial_rule() -> None:
+    # A webcam has no serial to validate, so the placeholder passes; what it
+    # cannot do without is the path, because that is its only identity.
+    assert webcam("top", "/dev/video5").device == "/dev/video5"
+    with pytest.raises(ConfigurationError, match="device path"):
+        RigCamera(name="top", serial="0", label="top", backend="opencv")
+    with pytest.raises(ConfigurationError, match="backend"):
+        RigCamera(name="top", serial="0", label="top", backend="gstreamer")
+
+
+def test_a_webcam_is_present_when_its_device_exists(tmp_path) -> None:
+    node = tmp_path / "video5"
+    node.touch()
+    by_id = fake_by_id(tmp_path, [])
+
+    result = discover([webcam("top", str(node))], by_id_dir=by_id)
+
+    found = result.matched["top"]
+    assert found.device == str(node)
+    assert not found.overridden
+    assert found.spec().backend == "opencv"
+    # It claims no serial, so it must not show up as an unclaimed RealSense.
+    assert result.unclaimed == ()
+
+
+def test_a_webcam_whose_device_is_gone_is_reported_by_path(tmp_path) -> None:
+    result = discover(
+        [webcam("top", str(tmp_path / "video5"))], by_id_dir=fake_by_id(tmp_path, [])
+    )
+
+    assert result.missing == {"top": str(tmp_path / "video5")}
+
+
+def test_a_webcam_override_replaces_the_declared_path(tmp_path) -> None:
+    node = tmp_path / "video7"
+    node.touch()
+
+    result = discover(
+        [webcam("top", str(tmp_path / "video5"))],
+        overrides={"top": str(node)},
+        by_id_dir=fake_by_id(tmp_path, []),
+    )
+
+    assert result.matched["top"].device == str(node)
+    assert result.matched["top"].overridden

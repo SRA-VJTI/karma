@@ -56,7 +56,6 @@ from .protocol import (
     encode_command,
     port_candidates,
 )
-from .servos import trossen_eth
 from .types import (
     ArmCapabilities,
     ArmMode,
@@ -128,16 +127,8 @@ def native_executable() -> Path:
 
 
 def validate_connection(connection: ArmConnection) -> None:
-    if isinstance(connection, FR3Connection):
-        # libfranka performs the authoritative protocol/firmware handshake.
-        return
-    if isinstance(connection, EthernetConnection):
-        if not trossen_eth.reachable(connection.ip):
-            raise ConnectionUnavailableError(
-                f"Ethernet controller at {connection.ip} is not reachable; check the cable, "
-                "power, and that the host has an address on the controller's subnet"
-            )
-        return
+    if isinstance(connection, (FR3Connection, EthernetConnection)):
+        raise ConnectionUnavailableError("Karma supports YAM CAN and SO101 serial connections only")
     if isinstance(connection, SerialConnection):
         device = Path(connection.device)
         if not device.exists():

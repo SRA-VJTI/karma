@@ -19,10 +19,10 @@ import numpy as np
 from .exceptions import ConfigurationError, StaleStateError
 from .inference import (
     DEFAULT_CHUNK_SPEED,
+    DEFAULT_CONTRACT,
     DEFAULT_MAX_EFFECTOR_STEP,
     DEFAULT_MAX_STEP_RAD,
     DEFAULT_PREFETCH_MARGIN_S,
-    MOLMOACT_ACTION_DIM,
     BoundedChunkExecutor,
     ChunkPrefetcher,
     EncodedFramesUnsupported,
@@ -88,6 +88,7 @@ class InferenceRolloutSource(TeleopSource):
         self._arms = dict(arms)
         self._readers = dict(readers)
         self._client = client
+        self._contract = getattr(client, "contract", DEFAULT_CONTRACT)
         self._instruction = instruction
         self._episode_seconds = float(episode_seconds)
         self._period = 1.0 / fps
@@ -102,6 +103,7 @@ class InferenceRolloutSource(TeleopSource):
         self._on_chunk = on_chunk
         self._on_tick = on_tick
         self._executor = BoundedChunkExecutor(
+            contract=self._contract,
             max_step_rad=max_step_rad,
             max_effector_step=max_effector_step,
             carry_targets=carry_targets,
@@ -109,7 +111,7 @@ class InferenceRolloutSource(TeleopSource):
         self._prefetcher = ChunkPrefetcher(client) if prefetch else None
         self._episode_started_at: float | None = None
         self._saved = False
-        self._plan = np.empty((0, MOLMOACT_ACTION_DIM), dtype=np.float64)
+        self._plan = np.empty((0, self._contract.dimension), dtype=np.float64)
         self._plan_index = 0
         self._closed = False
 
@@ -134,7 +136,7 @@ class InferenceRolloutSource(TeleopSource):
 
         if time.monotonic() - self._episode_started_at >= self._episode_seconds:
             self._saved = True
-            self._plan = np.empty((0, MOLMOACT_ACTION_DIM), dtype=np.float64)
+            self._plan = np.empty((0, self._contract.dimension), dtype=np.float64)
             return TeleopStep(event=EpisodeEvent.SAVE)
 
         return TeleopStep(targets=self.act(states), event=event)
@@ -157,7 +159,7 @@ class InferenceRolloutSource(TeleopSource):
             return {}
         if self._plan_index >= len(self._plan):
             try:
-                observation = build_observation(self._arms, self._readers)
+                observation = build_observation(self._arms, self._readers, contract=self._contract)
             except StaleStateError:
                 # The same gap, starting between the check above and this read.
                 return {}
@@ -212,7 +214,7 @@ class InferenceRolloutSource(TeleopSource):
         commanded; see :meth:`~openpi_control.inference.BoundedChunkExecutor.seed`
         for why it cannot come from the measurement.
         """
-        self._plan = np.empty((0, MOLMOACT_ACTION_DIM), dtype=np.float64)
+        self._plan = np.empty((0, self._contract.dimension), dtype=np.float64)
         self._plan_index = 0
         if self._prefetcher is not None:
             self._prefetcher.drop()
@@ -253,7 +255,7 @@ class InferenceRolloutSource(TeleopSource):
         if queued_s > self._prefetcher.latency_s + self._prefetch_margin_s:
             return
         try:
-            observation = build_observation(self._arms, self._readers)
+            observation = build_observation(self._arms, self._readers, contract=self._contract)
         except StaleStateError:
             return  # retried next tick; a prefetch is an optimisation, not a step
         self._prefetcher.submit(observation, self._instruction)
