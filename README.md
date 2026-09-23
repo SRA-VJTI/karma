@@ -328,6 +328,11 @@ runs in your MolmoAct2 environment.
 | [Safety](docs/safety.md) | Preflight and runtime checks |
 | [Viser](docs/viser.md) | Browser visualization |
 
+
+## Contributing
+
+Want to help? See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get set up.
+
 ## Acknowledgements
 
 Karma builds on [openpi-basic-control](https://github.com/Physical-Intelligence/openpi-basic-control)
