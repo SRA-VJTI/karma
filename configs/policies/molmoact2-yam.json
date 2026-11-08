@@ -1,0 +1,11 @@
+{
+  "provider": "molmoact2",
+  "server": "http://localhost:8202",
+  "norm_tag": "yam_dual_molmoact2",
+  "action_hz": 30,
+  "camera_roles": [
+    "top",
+    "left_wrist",
+    "right_wrist"
+  ]
+}

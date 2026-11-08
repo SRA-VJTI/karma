@@ -45,3 +45,7 @@ kinematics, and LeRobot adapters under `src/vr_teleop_kit/` are vendored from
 [vr-teleop-kit](https://github.com/Dream-Machines-Robotics/vr-teleop-kit),
 Copyright 2026 Dream Machines, under the Apache License 2.0. The original
 license text is preserved at `licenses/vr-teleop-kit-LICENSE`.
+
+The π0.5 YAM transforms in `servers/serve_pi05.py` are adapted from
+Inspect Robots' `examples/pi05/serve_pi05_yam.py` (robocurve, 2026, MIT).
+The license is retained in `licenses/inspect-robots-MIT.txt`.

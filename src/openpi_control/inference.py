@@ -577,7 +577,11 @@ class MolmoActClient:
             raise InferenceError("MolmoAct actions contain non-finite values")
         if self.contract.frame is not None:
             actions = self.contract.frame.from_policy(actions)
-        gpu_s = float(result.get("dt_ms") or 0.0) / 1000.0 if isinstance(result, dict) else 0.0
+        gpu_s = (
+            float(result.get("inference_ms", result.get("dt_ms")) or 0.0) / 1000.0
+            if isinstance(result, dict)
+            else 0.0
+        )
         self.last_latency = {
             "round_trip_s": round_trip_s,
             "gpu_s": gpu_s,

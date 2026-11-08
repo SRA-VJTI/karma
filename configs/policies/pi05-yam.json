@@ -1,0 +1,13 @@
+{
+  "provider": "pi05",
+  "server": "http://localhost:8204",
+  "norm_tag": "yam-bimanual-merged",
+  "action_hz": 30,
+  "num_steps": 10,
+  "enable_cuda_graph": false,
+  "camera_roles": [
+    "top",
+    "left_wrist",
+    "right_wrist"
+  ]
+}

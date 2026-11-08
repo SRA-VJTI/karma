@@ -1,4 +1,6 @@
 <p align="center">
+
+[VLA setup and operation](docs/policies/README.md): MolmoAct2, π0.5, and Dream clients, server setup, Viser trajectory previews, and debugging.
   <img src="docs/media/karma-banner.png" alt="Karma" width="960">
 </p>
 

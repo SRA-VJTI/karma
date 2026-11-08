@@ -33,6 +33,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
@@ -629,8 +630,13 @@ def record_session(
                 commands[name] = PositionCommand(positions, target.effector)
             # Validate the full command map before moving either arm. Record
             # the bounded targets actually sent, including human HITL targets.
-            for name, command in commands.items():
-                arms[name].command(command)  # type: ignore[attr-defined]
+            guard = getattr(source, "dispatch_guard", lambda: nullcontext(True))
+            with guard() as allowed:
+                if not allowed:
+                    next_tick = _wait(next_tick, period)
+                    continue
+                for name, command in commands.items():
+                    arms[name].command(command)  # type: ignore[attr-defined]
 
             if recording:
                 observation = observation_vector(arm_names, states, dofs)

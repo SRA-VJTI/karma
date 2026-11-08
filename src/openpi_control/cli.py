@@ -108,6 +108,7 @@ from .safety import (
     warn_stalled_grippers,
 )
 from .servos import SERVO_ZERO_DRIVERS, buses
+from .types import PositionCommand
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Callable, Mapping
@@ -115,7 +116,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from .arms import FollowerArm, LeaderArm
     from .backend import ArmBackend
     from .session import ArmSession
-    from .types import PositionCommand
 
 _OK = "ok"
 _WARN = "warn"
@@ -402,9 +402,7 @@ def run_doctor(
         CheckResult(
             _OK if cached else _WARN,
             "visual meshes",
-            str(cached)
-            if cached
-            else f"not cached — karma-viz --fetch-meshes --model {model}",
+            str(cached) if cached else f"not cached — karma-viz --fetch-meshes --model {model}",
         )
     )
 
@@ -1092,6 +1090,7 @@ def run_infer(
     rig: Rig,
     *,
     instruction: str,
+    policy_config=None,
     server: str | None = None,
     request_timeout_s: float = DEFAULT_REQUEST_TIMEOUT_S,
     num_steps: int = DEFAULT_MOLMOACT_NUM_STEPS,
@@ -1173,7 +1172,16 @@ def run_infer(
         enable_cuda_graph=enable_cuda_graph,
         contract=contract,
     )
-    client.health()
+    if policy_config is not None:
+        from .policies import create_client
+
+        client = create_client(policy_config, contract)
+        contract = client.contract
+    try:
+        client.health()
+    except Exception:
+        client.close()
+        raise
 
     # RGB is part of the model contract. The existing live command keeps BGR
     # for its cheap browser preview; inference requests RGB from the SDK so it
@@ -1310,6 +1318,51 @@ def run_infer(
             plan = start_pose_plan(states)  # type: ignore[arg-type]
             print(f"  reset    ramping to the training start pose ({len(plan)} steps)")
             walk(plan)
+
+        if getattr(client, "managed", False) and not reach_actions:
+            source = InferenceRolloutSource(
+                arms=arm_map,
+                readers=camera_readers,
+                client=client,
+                instruction=instruction,
+                episode_seconds=1e12,
+                fps=control_rate_hz,
+                speed=speed,
+                max_step_rad=max_step_rad,
+                max_effector_step=max_effector_step,
+                limits=limits,
+                prefetch=prefetch,
+                carry_targets=carry_targets,
+                stop=stop,
+            )
+            panel = None
+            try:
+                if scene is not None:
+                    from .policies.viewer import PolicyPanel
+
+                    panel = PolicyPanel(scene, rig, source, camera_readers, mesh_dir=mesh_dir)
+                while not stop.is_set():
+                    started = time.monotonic()
+                    states = {name: arm.latest_state for name, arm in arm_map.items()}
+                    targets = source.act(states)
+                    control = source.policy_session.control
+                    with control.lock:
+                        if (
+                            control.generation == source.policy_session._generation
+                            and not control.home
+                        ):
+                            for name, target in targets.items():
+                                arm_map[name].command(
+                                    PositionCommand(target.position_rad, target.effector)
+                                )
+                    stop.wait(max(0, period - (time.monotonic() - started)))
+            finally:
+                if source.policy_session.control.home:
+                    park = True
+                if panel:
+                    panel.close()
+                source.close()
+            raise KeyboardInterrupt
 
         while not stop.is_set():
             states = fresh_states()
@@ -1449,6 +1502,7 @@ def run_rollout(
     episode_seconds: float = 120.0,
     fps: int = 30,
     root: Path | None = None,
+    policy_config=None,
     server: str | None = None,
     request_timeout_s: float = DEFAULT_REQUEST_TIMEOUT_S,
     num_steps: int = DEFAULT_MOLMOACT_NUM_STEPS,
@@ -1504,7 +1558,7 @@ def run_rollout(
         raise ConfigurationError("--speed must be positive")
     if chunk_size is not None and chunk_size <= 0:
         raise ConfigurationError("--chunk-size must be positive")
-    if chunk_size is not None and chunk_size > MOLMOACT_ACTION_HORIZON:
+    if policy_config is None and chunk_size is not None and chunk_size > MOLMOACT_ACTION_HORIZON:
         raise ConfigurationError(
             f"--chunk-size cannot exceed the model horizon ({MOLMOACT_ACTION_HORIZON})"
         )
@@ -1517,7 +1571,16 @@ def run_rollout(
         enable_cuda_graph=enable_cuda_graph,
         contract=contract,
     )
-    client.health()
+    if policy_config is not None:
+        from .policies import create_client
+
+        client = create_client(policy_config, contract)
+        contract = client.contract
+    try:
+        client.health()
+    except Exception:
+        client.close()
+        raise
     capture_rig = rig.with_camera_capture(fps=fps, pixel_format="rgb8")
     cameras: dict[str, cameras_mod.AnyCameraReader] = {}
     scene = None
@@ -1527,6 +1590,7 @@ def run_rollout(
         "format": "openpi-control.inference-rollout-v1",
         "dataset_format": "LeRobot v3.0",
         "repo_id": repo_id,
+        "policy": policy_config.as_dict() if policy_config else {"provider": "molmoact2"},
         "instruction_is_per_episode": True,
         "speed": speed,
         "chunk_size": (chunk_size if chunk_size is not None else MOLMOACT_ACTION_HORIZON),
@@ -1570,6 +1634,7 @@ def run_rollout(
             prompt = _rollout_prompt(input_fn, episode_index, episodes)
             print(f"\nEpisode {episode_index}/{episodes}: {prompt!r}")
 
+            panel = None
             session = None
             live_arms: list[LiveArm] = []
             source: InferenceRolloutSource | None = None
@@ -1625,6 +1690,11 @@ def run_rollout(
                     on_chunk=on_chunk,
                     on_tick=on_tick,
                 )
+                if source.policy_session and scene is not None:
+                    from .policies.viewer import PolicyPanel
+
+                    source._on_chunk = source._on_tick = None
+                    panel = PolicyPanel(scene, rig, source, cameras, mesh_dir=mesh_dir)
                 print(f"  rollout  {source.describe()}")
                 episode_result = record_mod.record_session(
                     arms=arm_map,
@@ -1641,6 +1711,8 @@ def run_rollout(
                 )
             finally:
                 try:
+                    if panel is not None:
+                        panel.close()
                     if source is not None:
                         source.close()
                 finally:
@@ -1649,6 +1721,9 @@ def run_rollout(
                     if scene is not None:
                         scene.clear_chunk()
 
+            home_requested = bool(
+                source and source.policy_session and source.policy_session.control.home
+            )
             if park_failures:
                 print(
                     f"  {park_failures} arm(s) failed to park; stopping before the next episode",
@@ -1664,7 +1739,11 @@ def run_rollout(
                     print("  episode interrupted; partial frames were saved")
                 else:
                     print("  episode interrupted before a frame was captured")
-            success = _rollout_yes_no(input_fn, f"Episode {episode_index} successful? [y/n]: ")
+            success = (
+                None
+                if home_requested
+                else _rollout_yes_no(input_fn, f"Episode {episode_index} successful? [y/n]: ")
+            )
             if not saved:
                 print("  no LeRobot episode was written for this attempt")
             entries = manifest["episodes"]
@@ -1675,13 +1754,16 @@ def run_rollout(
                     "episode_index": saved_before if saved else None,
                     "prompt": prompt,
                     "success": success,
-                    "label": "y" if success else "n",
+                    "label": "unlabeled" if home_requested else ("y" if success else "n"),
+                    "home_and_stop": home_requested,
                     "saved": saved,
                     "aborted": aborted,
                 }
             )
             if manifest_path is not None:
                 _write_rollout_manifest(manifest_path, manifest)
+            if home_requested:
+                break
     except KeyboardInterrupt:
         print("\nrollout session stopped; hardware shutdown completed")
         status = 1
@@ -1749,6 +1831,7 @@ def run_hitl(
     episode_seconds: float = 120.0,
     fps: int = 30,
     root: Path | None = None,
+    policy_config=None,
     server: str | None = None,
     request_timeout_s: float = DEFAULT_REQUEST_TIMEOUT_S,
     num_steps: int = DEFAULT_MOLMOACT_NUM_STEPS,
@@ -1828,7 +1911,7 @@ def run_hitl(
         raise ConfigurationError("--speed must be positive")
     if chunk_size is not None and chunk_size <= 0:
         raise ConfigurationError("--chunk-size must be positive")
-    if chunk_size is not None and chunk_size > MOLMOACT_ACTION_HORIZON:
+    if policy_config is None and chunk_size is not None and chunk_size > MOLMOACT_ACTION_HORIZON:
         raise ConfigurationError(
             f"--chunk-size cannot exceed the model horizon ({MOLMOACT_ACTION_HORIZON})"
         )
@@ -1842,7 +1925,16 @@ def run_hitl(
         enable_cuda_graph=enable_cuda_graph,
         contract=contract,
     )
-    client.health()
+    if policy_config is not None:
+        from .policies import create_client
+
+        client = create_client(policy_config, contract)
+        contract = client.contract
+    try:
+        client.health()
+    except Exception:
+        client.close()
+        raise
     capture_rig = rig.with_camera_capture(fps=fps, pixel_format="rgb8")
     cameras: dict[str, cameras_mod.AnyCameraReader] = {}
     scene = None
@@ -1852,6 +1944,7 @@ def run_hitl(
         "format": "openpi-control.dagger-v1",
         "dataset_format": "LeRobot v3.0",
         "repo_id": repo_id,
+        "policy": policy_config.as_dict() if policy_config else {"provider": "molmoact2"},
         "instruction_is_per_episode": True,
         "intervention_column": "intervention",
         "policy_queried_during_intervention": False,
@@ -2036,6 +2129,7 @@ def _hitl_episodes(
         prompt = _rollout_prompt(input_fn, episode_index, episodes)
         print(f"\nEpisode {episode_index}/{episodes}: {prompt!r}")
 
+        panel = None
         session = None
         live_arms: list[LiveArm] = []
         source: object | None = None
@@ -2090,6 +2184,11 @@ def _hitl_episodes(
                 on_chunk=on_chunk,
                 on_tick=on_policy_tick,
             )
+            if scene is not None and getattr(policy, "policy_session", None):
+                from .policies.viewer import PolicyPanel
+
+                policy._on_chunk = policy._on_tick = None
+                panel = PolicyPanel(scene, rig, policy, cameras)
             source = DaggerSource(
                 policy=policy,
                 human=human,  # type: ignore[arg-type]
@@ -2152,6 +2251,8 @@ def _hitl_episodes(
             )
         finally:
             try:
+                if panel is not None:
+                    panel.close()
                 if source is not None:
                     stats = source.stats  # type: ignore[attr-defined]
                     source.close()  # type: ignore[attr-defined]
@@ -2167,6 +2268,11 @@ def _hitl_episodes(
                 if scene is not None:
                     scene.clear_chunk()
 
+        home_requested = bool(
+            source
+            and getattr(getattr(source, "_policy", None), "policy_session", None)
+            and source._policy.policy_session.control.home
+        )
         if park_failures:
             print(
                 f"  {park_failures} arm(s) failed to park; stopping before the next episode",
@@ -2185,7 +2291,7 @@ def _hitl_episodes(
         decision = "unlabeled"
         review_interrupted = False
         try:
-            if review.pending and not park_failures:
+            if review.pending and not park_failures and not home_requested:
                 decision = _hitl_review(input_fn, episode_index)
         except (KeyboardInterrupt, EOFError):
             review_interrupted = True
@@ -2211,6 +2317,7 @@ def _hitl_episodes(
                 "prompt": prompt,
                 "success": success,
                 "label": decision,
+                "home_and_stop": home_requested,
                 "discarded": decision == "d",
                 "saved": saved,
                 "aborted": aborted,
@@ -2221,7 +2328,7 @@ def _hitl_episodes(
             _write_rollout_manifest(manifest_path, manifest)
         if review_interrupted:
             raise KeyboardInterrupt
-        if park_failures:
+        if park_failures or home_requested:
             break
     return status
 
@@ -2806,6 +2913,10 @@ def _parse_rest_pose(raw: str | None, *, env_var: str, dofs: int = 6) -> list[fl
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "policy":
+        from .policies.diagnostics import main as policy_main
+
+        return policy_main(argv[1:])
     # Recording is an option of the main teleop workflow, using the shared v3 collector.
     if argv and argv[0] == "teleop" and ("--record" in argv or "--repo-id" in argv):
         argv[0] = "collect"
@@ -2815,6 +2926,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Preflight, control, inference, and teleoperation for a robot cell.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("policy", help="model-only doctor and saved-observation probe (no motors)")
 
     doctor = sub.add_parser("doctor", help="read-only preflight checks for an arm or a rig")
     _add_common(doctor, required=False)
@@ -3067,7 +3179,7 @@ def main(argv: list[str] | None = None) -> int:
     infer = sub.add_parser(
         "inference",
         aliases=["infer"],
-        help="run bimanual YAM MolmoAct2 inference, execute chunks, and visualize them",
+        help="run a VLA policy, execute bounded chunks, and visualize predictions",
     )
     infer.add_argument("--rig", default="yam_bimanual", help="the trained bimanual YAM rig")
     infer.add_argument(
@@ -3200,7 +3312,7 @@ def main(argv: list[str] | None = None) -> int:
 
     rollout = sub.add_parser(
         "rollout",
-        help="record interactive MolmoAct episodes as a LeRobot v3 dataset",
+        help="record interactive VLA policy episodes as a LeRobot v3 dataset",
     )
     rollout.add_argument("--rig", default="yam_bimanual", help="the trained bimanual YAM rig")
     rollout.add_argument(
@@ -3334,7 +3446,7 @@ def main(argv: list[str] | None = None) -> int:
 
     hitl = sub.add_parser(
         "hitl",
-        help="record DAgger episodes: MolmoAct drives, Right B hands the arms to the operator",
+        help="record DAgger episodes: the policy drives, Right B hands control to the operator",
     )
     hitl.add_argument("--rig", default="yam_bimanual", help="the trained bimanual YAM rig")
     hitl.add_argument(
@@ -3766,7 +3878,50 @@ def main(argv: list[str] | None = None) -> int:
             help="state/action frame JSON from `karma so101-policy-frame` when the "
             "checkpoint was not trained on Karma's radians",
         )
+    for policy_parser in (infer, rollout, hitl):
+        policy_parser.add_argument("--policy", choices=("molmoact2", "pi05", "dream"), default=None)
+        policy_parser.add_argument("--policy-config", type=Path)
     args = parser.parse_args(argv)
+    if args.command in {"inference", "infer", "rollout", "hitl"}:
+        from .policies.config import PolicyConfig
+
+        mapping = {
+            "--server": ("server", "server"),
+            "--request-timeout": ("timeout_s", "request_timeout"),
+            "--num-steps": ("num_steps", "num_steps"),
+            "--jpeg-quality": ("jpeg_quality", "jpeg_quality"),
+            "--raw-frames": ("jpeg_quality", "jpeg_quality"),
+            "--no-cuda-graph": ("enable_cuda_graph", "cuda_graph"),
+            "--norm-tag": ("norm_tag", "norm_tag"),
+            "--policy-frame": ("policy_frame", "policy_frame"),
+        }
+        explicit = {token.split("=", 1)[0] for token in argv if token.startswith("--")}
+        overrides = {
+            field: getattr(args, attr)
+            for flag, (field, attr) in mapping.items()
+            if flag in explicit
+        }
+        if "policy_frame" in overrides:
+            overrides["policy_frame"] = str(Path(overrides["policy_frame"]).resolve())
+        try:
+            args.policy_config_resolved = PolicyConfig.load(
+                args.policy_config, provider=args.policy, **overrides
+            )
+            cfg = args.policy_config_resolved
+            if cfg.provider == "dream" and explicit & {
+                "--raw-frames",
+                "--num-steps",
+                "--no-cuda-graph",
+                "--reach-actions",
+                "--reset-start-pose",
+            }:
+                raise ConfigurationError(
+                    "Dream does not accept MolmoAct solver, raw-frame or start-pose flags"
+                )
+            args.norm_tag = cfg.norm_tag or args.norm_tag
+            args.policy_frame = cfg.policy_frame or args.policy_frame
+        except ConfigurationError as exc:
+            parser.error(str(exc))
     log_path = runlog.setup_run_logging(args.command)
 
     commands = {
@@ -4234,6 +4389,7 @@ def _command_infer(args: argparse.Namespace, log_path: Path) -> int:
     status = run_infer(
         rig,
         instruction=args.instruction,
+        policy_config=getattr(args, "policy_config_resolved", None),
         server=args.server,
         request_timeout_s=args.request_timeout,
         num_steps=args.num_steps,
@@ -4275,6 +4431,7 @@ def _command_rollout(args: argparse.Namespace, log_path: Path) -> int:
         episode_seconds=args.episode_seconds,
         fps=args.fps,
         root=args.root,
+        policy_config=getattr(args, "policy_config_resolved", None),
         server=args.server,
         request_timeout_s=args.request_timeout,
         num_steps=args.num_steps,
@@ -4324,6 +4481,7 @@ def _command_hitl(args: argparse.Namespace, log_path: Path) -> int:
         episode_seconds=args.episode_seconds,
         fps=args.fps,
         root=args.root,
+        policy_config=getattr(args, "policy_config_resolved", None),
         server=args.server,
         request_timeout_s=args.request_timeout,
         num_steps=args.num_steps,
