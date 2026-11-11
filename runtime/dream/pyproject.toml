@@ -1,0 +1,8 @@
+[project]
+name = "karma-dream-runtime"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = ["dreamlabs==1.0.23", "dreamlabs-client==1.0.14"]
+
+[tool.uv]
+package = false

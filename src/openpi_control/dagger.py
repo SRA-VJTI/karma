@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -170,6 +171,18 @@ class DaggerSource(TeleopSource):
     # TeleopSource
     # ----------------------------------------------------------------- #
 
+    @contextmanager
+    def dispatch_guard(self):
+        session = getattr(self._policy, "policy_session", None)
+        if session is None:
+            yield True
+        elif self._intervening:
+            with session.control.lock:
+                yield not session.control.home
+        else:
+            with self._policy.dispatch_guard() as allowed:
+                yield allowed
+
     def describe(self) -> str:
         return (
             f"DAgger over {self._policy.describe()}; {self.TAKE} takes over, "
@@ -177,6 +190,9 @@ class DaggerSource(TeleopSource):
         )
 
     def poll(self, states: Mapping[str, ArmState | None]) -> TeleopStep:
+        session = getattr(self._policy, "policy_session", None)
+        if session and session.control.home:
+            raise KeyboardInterrupt
         if self._stop.is_set() or self._saved:
             return TeleopStep(event=EpisodeEvent.STOP)
 
@@ -299,6 +315,9 @@ class DaggerSource(TeleopSource):
             # nowhere near it.
             self._say("!  TAKE-OVER IGNORED — no arm has published a pose yet")
             return
+        suspend = getattr(self._policy, "suspend_for_intervention", None)
+        if suspend:
+            suspend()
         self._intervening = True
         self._interventions += 1
         if self._on_mode_change is not None:

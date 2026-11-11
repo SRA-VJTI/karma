@@ -195,9 +195,7 @@ class _FakeSession:
 
 def _observation() -> inference.BimanualObservation:
     frame = np.zeros((2, 2, 3), dtype=np.uint8)
-    return inference.BimanualObservation(
-        frame, frame, frame, np.zeros(14, dtype=np.float32)
-    )
+    return inference.BimanualObservation(frame, frame, frame, np.zeros(14, dtype=np.float32))
 
 
 def test_http_client_posts_json_numpy_payload(monkeypatch) -> None:
@@ -252,9 +250,7 @@ def test_health_rejects_a_server_with_another_contract(monkeypatch) -> None:
 def test_frames_go_out_jpeg_encoded_by_default(monkeypatch) -> None:
     pytest.importorskip("PIL")
     frame = np.zeros((32, 32, 3), dtype=np.uint8)
-    encoded = inference.encode_frame(
-        frame, jpeg_quality=inference.DEFAULT_MOLMOACT_JPEG_QUALITY
-    )
+    encoded = inference.encode_frame(frame, jpeg_quality=inference.DEFAULT_MOLMOACT_JPEG_QUALITY)
     # A 1-D uint8 array is what the server reads as an encoded image.
     assert encoded.ndim == 1
     assert encoded.dtype == np.uint8
@@ -264,9 +260,7 @@ def test_frames_go_out_jpeg_encoded_by_default(monkeypatch) -> None:
 
 # Verbatim from the two generations of host_server_yam.py's ``_to_pil``. Both
 # say "HxWx3", which is why matching that alone cannot tell them apart.
-RAW_ONLY_SERVER_ERROR = (
-    '{"error": "inference failed: image must be HxWx3, got shape (271814,)"}'
-)
+RAW_ONLY_SERVER_ERROR = '{"error": "inference failed: image must be HxWx3, got shape (271814,)"}'
 CURRENT_SERVER_ERROR = (
     '{"error": "inference failed: image must be HxWx3 (raw) or 1-D uint8 '
     '(encoded), got shape (360, 640, 4)"}'
@@ -289,9 +283,7 @@ def test_only_a_raw_only_server_reads_as_unable_to_decode_jpeg() -> None:
         (CURRENT_SERVER_ERROR, inference.InferenceError),
     ],
 )
-def test_a_bad_frame_is_not_mistaken_for_an_out_of_date_server(
-    monkeypatch, body, expected
-) -> None:
+def test_a_bad_frame_is_not_mistaken_for_an_out_of_date_server(monkeypatch, body, expected) -> None:
     """Only the raw-only server may cost the run its JPEG transport.
 
     A current server rejecting a genuinely malformed frame used to trip the
@@ -327,9 +319,7 @@ def test_both_transports_carry_the_same_picture(monkeypatch) -> None:
 
     encoded = inference.encode_frame(frame, jpeg_quality=95)
     assert encoded.ndim == 1
-    np.testing.assert_allclose(
-        inference.decode_wire_frame(encoded), raw, atol=2
-    )
+    np.testing.assert_allclose(inference.decode_wire_frame(encoded), raw, atol=2)
 
     with pytest.raises(inference.InferenceError, match="HxWx3"):
         inference.encode_frame(np.zeros((8, 8, 4), dtype=np.uint8), jpeg_quality=95)
@@ -346,9 +336,7 @@ def test_http_client_rejects_wrong_action_width(monkeypatch) -> None:
             return "{}"
 
     monkeypatch.setattr(inference, "_json_numpy", lambda: FakeJsonNumpy)
-    client = inference.MolmoActClient(
-        jpeg_quality=0, session=_FakeSession(_FakeResponse("{}"))
-    )
+    client = inference.MolmoActClient(jpeg_quality=0, session=_FakeSession(_FakeResponse("{}")))
     with pytest.raises(inference.InferenceError, match=r"shape \(N, 14\)"):
         client.infer(_observation(), "task")
 
@@ -368,9 +356,7 @@ def test_wire_frames_are_kept_and_decode_to_what_the_policy_saw(monkeypatch) -> 
 
     monkeypatch.setattr(inference, "_json_numpy", lambda: FakeJsonNumpy)
     frame = np.random.default_rng(0).integers(0, 255, (48, 64, 3)).astype(np.uint8)
-    observation = inference.BimanualObservation(
-        frame, frame, frame, np.zeros(14, dtype=np.float32)
-    )
+    observation = inference.BimanualObservation(frame, frame, frame, np.zeros(14, dtype=np.float32))
     client = inference.MolmoActClient(session=_FakeSession(_FakeResponse("{}")))
     client.infer(observation, "task")
 
@@ -666,9 +652,7 @@ def test_bounded_executor_counts_the_actions_it_files_down() -> None:
     assert executor.clamped == 1
 
 
-def test_run_infer_drops_to_raw_frames_when_the_server_cannot_decode(
-    monkeypatch, capsys
-) -> None:
+def test_run_infer_drops_to_raw_frames_when_the_server_cannot_decode(monkeypatch, capsys) -> None:
     """A server that rejects JPEG costs the payload format, not the run."""
 
     class FakePolicy:
@@ -759,17 +743,22 @@ def test_infer_flags_reach_the_runtime(monkeypatch) -> None:
         cli.main(
             [
                 "infer",
-                "--instruction", "fold the cloth",
+                "--instruction",
+                "fold the cloth",
                 "--skip-preflight",
                 "--raw-frames",
                 "--no-cuda-graph",
                 "--reach-actions",
-                "--max-step-rad", "0.3",
-                "--max-effector-step", "0.5",
+                "--max-step-rad",
+                "0.3",
+                "--max-effector-step",
+                "0.5",
                 "--no-prefetch",
-                "--prefetch-margin-s", "0.2",
+                "--prefetch-margin-s",
+                "0.2",
                 "--reset-start-pose",
-                "--speed", "0.5",
+                "--speed",
+                "0.5",
                 "--carry-targets",
             ]
         )
@@ -1032,3 +1021,79 @@ def test_observe_effectors_matches_observe_and_tolerates_missing_state() -> None
     fresh = inference.GripperWatch()
     fresh.observe_effectors({"left": None}, {"left": _state("left")})
     assert fresh.stalled() == []
+
+
+@pytest.mark.parametrize("provider", ["molmoact2", "pi05", "dream"])
+def test_managed_inference_dispatches_commands_and_parks(monkeypatch, tmp_path, provider):
+    """Exercise the actual managed CLI loop, including runtime command construction."""
+    from openpi_control.policies.config import PolicyConfig
+
+    monkeypatch.setenv("OPENPI_LOG_DIR", str(tmp_path / "logs"))
+    stop = threading.Event()
+
+    class ManagedPolicy:
+        managed = True
+        contract = inference.DEFAULT_CONTRACT
+        display_name = provider
+        config = PolicyConfig(provider=provider, checkpoint="test/model")
+        action_hz = config.action_hz
+        url = "test-policy"
+        last_latency = {}
+        last_wire_frames = {}
+        closed = False
+        calls = 0
+
+        def health(self):
+            return {"status": "ok"}
+
+        def reset(self):
+            pass
+
+        def infer(self, *_args, **_kwargs):
+            self.calls += 1
+            return np.full((4, 14), 0.1)
+
+        def close(self):
+            self.closed = True
+
+    made = {}
+
+    def factory(rig_arm):
+        class Backend(FakeArmBackend):
+            def command(self, command):
+                super().command(command)
+                if rig_arm.name == "right" and np.any(command.position_rad != 0):
+                    stop.set()
+
+        backend = Backend()
+        made[rig_arm.name] = backend
+        return backend
+
+    frame = np.zeros((2, 2, 3), dtype=np.uint8)
+    readers = {
+        name: SimpleNamespace(latest=lambda: frame, pixel_format="rgb8")
+        for name in inference.DEFAULT_CONTRACT.cameras
+    }
+    monkeypatch.setattr(cli, "open_inference_cameras", lambda *_a, **_k: readers)
+    policy = ManagedPolicy()
+    deadline = threading.Timer(2, stop.set)
+    deadline.start()
+    try:
+        status = cli.run_infer(
+            resolve_rig("yam_bimanual"),
+            instruction="test task",
+            visualize=False,
+            control_rate_hz=1000,
+            backend_factory=factory,
+            policy=policy,
+            stop=stop,
+        )
+    finally:
+        deadline.cancel()
+    assert status == 0
+    assert policy.calls and policy.closed
+    for backend in made.values():
+        assert any(np.any(command.position_rad != 0) for command in backend.commands)
+        assert all(isinstance(command, PositionCommand) for command in backend.commands)
+        assert backend.closes[0] is True
+        assert not backend.connected

@@ -45,3 +45,12 @@ its complete flag set; this page is the map.
 Policy commands check the server's health contract (`norm_tag`, `state_dim`,
 `num_cameras`) before any motor is energized, and required cameras must deliver
 a frame first. See [safety](safety.md).
+
+## Policy selection and diagnostics
+
+`inference`, `rollout`, and `hitl` accept `--policy molmoact2|pi05|dream` and
+`--policy-config FILE`. Existing MolmoAct flags remain supported.
+`karma policy doctor --policy-config FILE` checks a provider without motor access;
+`karma policy probe --policy-config FILE --observation FILE --instruction TEXT`
+runs a saved NPZ observation without executing actions. See the
+[policy hub](policies/README.md) for profiles, Viser controls, and setup.

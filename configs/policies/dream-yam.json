@@ -1,0 +1,12 @@
+{
+  "provider": "dream",
+  "checkpoint": "dreamlabs/dream-1",
+  "action_hz": 20,
+  "execution_horizon": 30,
+  "ik": true,
+  "camera_roles": [
+    "top",
+    "left_wrist",
+    "right_wrist"
+  ]
+}

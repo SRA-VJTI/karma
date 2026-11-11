@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
@@ -114,16 +115,32 @@ class InferenceRolloutSource(TeleopSource):
         self._plan = np.empty((0, self._contract.dimension), dtype=np.float64)
         self._plan_index = 0
         self._closed = False
+        self.policy_session = None
+        if getattr(client, "managed", False):
+            from .policies.session import PolicySession
+
+            self.policy_session = PolicySession(client, instruction, speed=speed, prefetch=prefetch)
+            self._prefetcher = None
+            self._hold_commands = {}
+            self._has_executed_policy = False
+            self._total_rows = 0
+            self._requested_rows = 0
+            self._row_fraction = 0.0
 
     def describe(self) -> str:
         chunk = "full" if self._chunk_size is None else str(self._chunk_size)
         prefetch = "prefetch" if self._prefetcher is not None else "no-prefetch"
+        if self.policy_session:
+            prefetch = "adaptive-prefetch" if self.policy_session.prefetch else "no-prefetch"
         return (
-            f"MolmoAct({self._instruction!r}, {self._episode_seconds:g}s, "
+            f"{getattr(self._client, 'display_name', 'MolmoAct')}"
+            f"({self._instruction!r}, {self._episode_seconds:g}s, "
             f"speed={self._speed:g}, chunk={chunk}, {prefetch})"
         )
 
     def poll(self, states: Mapping[str, ArmState | None]) -> TeleopStep:
+        if self.policy_session and self.policy_session.control.home:
+            raise KeyboardInterrupt
         if self._stop.is_set():
             return TeleopStep(event=EpisodeEvent.STOP)
         if self._saved:
@@ -150,6 +167,8 @@ class InferenceRolloutSource(TeleopSource):
         this source must not advance its plan or spend an inference call on a
         tick whose commands would be thrown away.
         """
+        if self.policy_session:
+            return self._managed_act(states)
         fresh_states = self._fresh_states(states)
         if fresh_states is None:
             # Nothing is planned, stepped, or requested on this tick. The
@@ -214,6 +233,10 @@ class InferenceRolloutSource(TeleopSource):
         commanded; see :meth:`~openpi_control.inference.BoundedChunkExecutor.seed`
         for why it cannot come from the measurement.
         """
+        if self.policy_session:
+            self.policy_session.control.intervention(False)
+            self.policy_session.invalidate()
+            self._hold_commands = {}
         self._plan = np.empty((0, self._contract.dimension), dtype=np.float64)
         self._plan_index = 0
         if self._prefetcher is not None:
@@ -224,8 +247,121 @@ class InferenceRolloutSource(TeleopSource):
         if self._closed:
             return
         self._closed = True
+        if self.policy_session:
+            self.policy_session.close()
         if self._prefetcher is not None:
             self._prefetcher.close()
+
+    @contextmanager
+    def dispatch_guard(self):
+        if self.policy_session is None:
+            yield True
+            return
+        control = self.policy_session.control
+        with control.lock:
+            yield control.generation == self.policy_session._generation and not control.home
+
+    def suspend_for_intervention(self):
+        if self.policy_session:
+            self.policy_session.control.intervention(True)
+            self.policy_session.invalidate()
+
+    def _observation_unavailable(self, detail):
+        session = self.policy_session
+        control = session.control
+        if not (control.paused or control.human or control.home):
+            if not self._has_executed_policy:
+                control.wait_for_observation(f"Waiting for {detail} before first policy motion")
+            else:
+                control.pause(f"Waiting for {detail}; Resume policy to reobserve")
+
+    def _managed_act(self, states):
+        session = self.policy_session
+        control = session.control
+        if control.home:
+            raise KeyboardInterrupt
+        fresh = self._fresh_states(states)
+        if fresh is None:
+            self._observation_unavailable("fresh feedback")
+            return {}
+        changed = session.update_generation()
+        if changed:
+            self._plan = np.empty((0, self._contract.dimension))
+            self._plan_index = 0
+            self._row_fraction = 0.0
+            self._executor.seed(
+                fresh, effector={n: c.effector for n, c in self._hold_commands.items()}
+            )
+            # Freeze at measured joints with the last commanded gripper opening.
+            self._hold_commands = {
+                n: PositionCommand(
+                    position_rad=tuple(st.joints.position_rad),
+                    effector=self._hold_commands[n].effector
+                    if n in self._hold_commands
+                    else st.effector.position,
+                )
+                for n, st in fresh.items()
+            }
+        if control.paused or control.human or control.home:
+            return {
+                n: ArmTarget(tuple(c.position_rad), c.effector)
+                for n, c in self._hold_commands.items()
+            }
+        try:
+            observation = build_observation(self._arms, self._readers, contract=self._contract)
+        except StaleStateError:
+            self._observation_unavailable("fresh camera observations")
+            return {}
+        if control.waiting:
+            control.observation_ready()
+            # Reseed the executor on the next tick after the generation changes.
+            return {}
+        session.record_commands(self._hold_commands)
+        session.feed(observation)
+        actions = session.take()
+        if actions is not None:
+            skipped = self._total_rows - self._requested_rows
+            actions = actions[skipped:]
+            if not len(actions):
+                control.pause("Prediction exhausted during inference")
+                return {}
+            if self._chunk_size is not None:
+                if self._chunk_size > len(actions):
+                    control.pause("Requested chunk size exceeds available prediction")
+                    return {}
+                actions = actions[: self._chunk_size]
+            self._plan = actions
+            self._plan_index = 0
+            self._row_fraction = 0.0
+            session.preview = actions.copy()
+            if self._on_chunk:
+                self._on_chunk(actions.copy())
+        remaining = len(self._plan) - self._plan_index
+        if session.due(self._plan_index, remaining):
+            self._requested_rows = self._total_rows
+            session.request(observation)
+        if remaining <= 0:
+            return {
+                n: ArmTarget(tuple(c.position_rad), c.effector)
+                for n, c in self._hold_commands.items()
+            }
+        with control.lock:
+            if not control.permits(session._generation):
+                return {}
+            commands = self._executor.step(self._plan[self._plan_index], limits=self._limits)
+            self._has_executed_policy = True
+            self._hold_commands = commands
+            session.record_commands(commands)
+            self._row_fraction += self._period * session.action_hz
+            advance = int(self._row_fraction + 1e-9)
+            self._row_fraction -= advance
+            advance = min(advance, len(self._plan) - self._plan_index)
+            self._plan_index += advance
+            self._total_rows += advance
+            session.progress = self._plan_index
+            if self._on_tick:
+                self._on_tick(fresh, commands, self._plan_index)
+            return {n: ArmTarget(tuple(c.position_rad), c.effector) for n, c in commands.items()}
 
     def _fresh_states(self, states: Mapping[str, ArmState | None]) -> dict[str, ArmState] | None:
         return self._state_guard.check(states)

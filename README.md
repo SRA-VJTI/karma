@@ -3,10 +3,12 @@
 </p>
 
 Karma is the robot control stack for **bimanual YAM** and **SO100/SO101**
-arms: Meta Quest VR teleoperation, MolmoAct2 policy inference, autonomous
-rollout recording, and human-in-the-loop (HITL / DAgger) data collection.
-The Quest relay and WebXR client, the IK, the native motor runtime, the camera
-capture layer and the LeRobot v3 dataset writer all live in this repository.
+arms, bringing Meta Quest VR teleoperation, **MolmoAct2, π0.5, and Dream** policy
+inference, autonomous rollout recording, and human-in-the-loop (HITL / DAgger)
+data collection into one workflow. The Quest relay and WebXR client, inverse
+kinematics, native motor runtime, camera capture, and LeRobot v3 dataset writer
+all live in this repository. Shared policy controls and Viser trajectory previews
+connect model predictions to robot execution.
 
 [![YAM arms in motion with an operator using Quest controllers](docs/media/karma-demo.gif)](https://x.com/k7agar/status/2094818716433465631)
 
@@ -19,17 +21,31 @@ capture layer and the LeRobot v3 dataset writer all live in this repository.
 
 Previews loop at 1.25× speed (teleop and YAM) or 1.5× (rollout); full videos play at recorded speed.
 
+## YAM · Dream rollout
+
+[![Dream folding a towel with overhead and wrist camera views](docs/media/yam-dream-rollout.gif)](docs/media/yam-dream-rollout.mp4)
+
+**[Watch the full Dream rollout · 2 min](docs/media/yam-dream-rollout.mp4)** ·
+[Setup and run](docs/policies/dream.md) · [Episode details](docs/policies/validation.md)
+
+“Fold the towel” with `dreamlabs/dream-1-beta` on bimanual YAM. The collage shows
+the overhead camera and both wrist views; the preview plays at 1.5× speed and the
+full video at recorded speed. Karma recorded 3,593 frames during the episode.
+
 Everything runs through one executable, `uv run karma`, with four main workflows:
 
 | Workflow | Command | What it does |
 | --- | --- | --- |
 | Teleop | `karma teleop` | Drive the arms from a Quest; add `--record` to write demonstrations |
-| Inference | `karma inference` | Run a MolmoAct2 checkpoint continuously with one instruction |
+| Inference | `karma inference` | Run a MolmoAct2, π0.5, or Dream policy continuously with one instruction |
 | Rollout | `karma rollout` | Timed policy episodes, task asked per episode, saved as a dataset |
 | HITL | `karma hitl` | Policy drives, you take over from the Quest when needed; DAgger labels |
 
-The model itself runs elsewhere: a MolmoAct2 **server** on a GPU host, which
-Karma talks to over HTTP. See [Model servers](docs/model-servers.md).
+MolmoAct2 and π0.5 run on a GPU host through Karma's serving adapters; Dream
+uses its hosted API through an isolated SDK worker. All three share policy
+selection, execution controls, recording, and debugging tools.
+See [VLA setup and operation](docs/policies/README.md) for clients, server setup,
+Viser trajectory previews, and debugging.
 
 ## Supported hardware
 
@@ -359,5 +375,5 @@ See [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md).
 | `tests/` | Hardware-free tests |
 
 Logs go to `logs/` (`KARMA_LOG_DIR` overrides). Run tests with
-`uv run --extra dev pytest`. Physical calibration, camera placement and a
-checkpoint trained for your rig still need validation on your workstation.
+`uv run --extra dev pytest`. See the hardware and policy guides for calibration,
+camera placement, and checkpoint configuration.

@@ -1,3 +1,7 @@
+# VLA model servers
+
+Maintained server setup and client integration now live in the [policy hub](policies/README.md), with [MolmoAct2](policies/molmoact2.md), [π0.5](policies/pi05.md), and [Dream](policies/dream.md) runbooks. The reference deployment notes below describe the original external MolmoAct servers.
+
 # MolmoAct2 model servers
 
 Karma never loads a model. A small HTTP server in the MolmoAct2 environment

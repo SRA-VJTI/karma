@@ -1,0 +1,10 @@
+{
+  "provider": "molmoact2",
+  "server": "http://localhost:8203",
+  "norm_tag": "so100_so101_molmoact2",
+  "action_hz": 30,
+  "camera_roles": [
+    "top",
+    "side"
+  ]
+}

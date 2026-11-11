@@ -1,3 +1,7 @@
+# Shared policy execution
+
+See the [policy hub](policies/README.md) for MolmoAct2, π0.5 and Dream profiles, shared inference/rollout/HITL commands, and Viser Stop policy / Resume policy / Home and stop controls. The MolmoAct-specific wire and calibration reference follows.
+
 # MolmoAct2 integration
 
 Karma is the robot-side client. A MolmoAct2 model server runs on a GPU host;

@@ -5,7 +5,7 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "karma"
 version = "0.2.0"
-description = "YAM and SO101 Quest teleoperation, MolmoAct2 inference and LeRobot v3 DAgger"
+description = "YAM and SO101 teleoperation, VLA policy clients and LeRobot v3 DAgger"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
@@ -50,6 +50,11 @@ sdist.include = [
   "licenses/**",
   "tests/**",
   "scripts/**",
+  "servers/**",
+  "configs/policies/**",
+  "runtime/dream/pyproject.toml",
+  "runtime/dream/uv.lock",
+  "docs/policies/**",
 ]
 
 [tool.scikit-build.cmake.define]
