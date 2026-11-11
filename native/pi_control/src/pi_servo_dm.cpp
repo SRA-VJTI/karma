@@ -488,7 +488,15 @@ ReturnCode ServoDm::parse_dm_servo_status(DriverCan::can_frame_t* p_frame, Recei
         return ReturnCode::INVALID_PARAM;
     }
 
-    if (p_data[2] == DM_CMD_WRITE) {
+    // A register-write acknowledgement echoes the request: bytes 0..1 carry the
+    // motor ID (low, high) and byte 2 the write command. In a status frame byte 2
+    // is the low byte of the encoded position, which is 0x55 once in every 256
+    // counts, so byte 2 alone cannot tell the two apart. Require the echoed ID
+    // layout as well (high ID byte zero, no status nibble). A status frame only
+    // matches that at the lower edge of the position range, about -12.47 rad,
+    // which is far outside any joint's travel.
+    const bool is_write_ack = p_data[2] == DM_CMD_WRITE && p_data[1] == 0x00 && (p_data[0] >> 4) == 0;
+    if (is_write_ack) {
         return ReturnCode::SUCCESS;
     } else {
         auto registered_servo = Driver::lock_registered_servo(motor_id);

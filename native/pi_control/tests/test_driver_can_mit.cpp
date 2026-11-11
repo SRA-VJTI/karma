@@ -543,6 +543,62 @@ TEST(ServoDmParser, DmStatusRejectsNullDriver) {
     Driver::register_servo_data_index(servo.id_, -1, nullptr);
 }
 
+// Byte 2 of a status frame is the low byte of the encoded position. A motor
+// resting where that byte equals the register-write command (0x55) must still
+// refresh the receive cache; otherwise its feedback looks stale for as long as
+// it holds that position.
+TEST(ServoDmParser, DmStatusWithPositionLowByte0x55RefreshesCache) {
+    CommandLineArgs cla{};
+    DriverCanMitTestDevice device(cla);
+    DriverCanMit driver(&device, cla);
+    ServoDmParam param{0.0f, 500.0f, 0.0f, 5.0f, -12.5f, 12.5f, -30.0f, 30.0f, -10.0f, 10.0f,
+                       0.2f, 0.3f, 0.1f};
+    DriverCanMitTestServoDm servo(&device, &driver, &param, 1, ServoType::DM_4310);
+    Driver::register_servo_data_index(servo.id_, servo.data_index_, &servo);
+
+    DriverCan::can_frame_t frame{};
+    ReceivedServoData cache[MAX_SERVO_INFO_BUF_SIZE]{};
+    frame.can_dlc = 8;
+    frame.data[0] = static_cast<uint8_t>(0x10 | servo.id_);  // enabled, motor 1
+    frame.data[1] = 0x7F;                                    // position 0x7F55, just below zero
+    frame.data[2] = 0x55;
+    frame.data[7] = 40;
+
+    EXPECT_EQ(ServoDm::parse_dm_servo_status(&frame, cache, &DriverCanMit::find_data_index, &driver),
+              ReturnCode::SUCCESS);
+    EXPECT_FALSE(Profile::is_zero(cache[servo.data_index_].last_update_perf_));
+    EXPECT_EQ(cache[servo.data_index_].motor_id_, servo.id_);
+    EXPECT_EQ(cache[servo.data_index_].error_, 0x1);
+    EXPECT_NEAR(cache[servo.data_index_].angle_actual_rad_, -0.0654f, 1e-3f);
+    EXPECT_EQ(cache[servo.data_index_].temperature_, 40);
+
+    Driver::register_servo_data_index(servo.id_, -1, nullptr);
+}
+
+TEST(ServoDmParser, DmRegisterWriteAckLeavesStatusCacheUntouched) {
+    CommandLineArgs cla{};
+    DriverCanMitTestDevice device(cla);
+    DriverCanMit driver(&device, cla);
+    ServoDmParam param{0.0f, 500.0f, 0.0f, 5.0f, -12.5f, 12.5f, -30.0f, 30.0f, -10.0f, 10.0f,
+                       0.2f, 0.3f, 0.1f};
+    DriverCanMitTestServoDm servo(&device, &driver, &param, 1, ServoType::DM_4310);
+    Driver::register_servo_data_index(servo.id_, servo.data_index_, &servo);
+
+    DriverCan::can_frame_t frame{};
+    ReceivedServoData cache[MAX_SERVO_INFO_BUF_SIZE]{};
+    frame.can_dlc = 8;
+    frame.data[0] = static_cast<uint8_t>(servo.id_);  // echoed motor ID, low byte
+    frame.data[1] = 0x00;                             // echoed motor ID, high byte
+    frame.data[2] = 0x55;                             // register-write command
+    frame.data[3] = 0x09;
+
+    EXPECT_EQ(ServoDm::parse_dm_servo_status(&frame, cache, &DriverCanMit::find_data_index, &driver),
+              ReturnCode::SUCCESS);
+    EXPECT_TRUE(Profile::is_zero(cache[servo.data_index_].last_update_perf_));
+
+    Driver::register_servo_data_index(servo.id_, -1, nullptr);
+}
+
 TEST(DriverCanMitTransport, RejectsServoDataIndexOutsideReceiveCache) {
     CommandLineArgs cla{};
     DriverCanMitTestDevice device(cla);
