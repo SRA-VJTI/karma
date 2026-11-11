@@ -41,3 +41,17 @@ The supplied logo is preserved in `media-inbox/karma-logo-original.png`.
 `karma-banner.png` is a centered 1280×448 crop at (384, 138) for the README.
 `karma-social-preview.png` is a 1280×640 crop at (384, 42) for GitHub's
 repository social preview. Both preserve the supplied artwork without redrawing it.
+
+## Dream rollout
+
+`yam-dream-rollout.mp4` is the full 2026-11-08 Dream-1-beta YAM episode,
+exported from `outputs/rollout-collages/dream-towel-rollout-02-collage.mp4`.
+It preserves the 1440×640 task banner and three-camera collage, 30 fps, and
+119.767-second duration. The documentation copy uses H.264, yuv420p, CRF 26,
+the fast preset, and MP4 fast-start metadata, with audio and metadata omitted.
+
+`yam-dream-rollout.gif` previews seconds 38–50 at 640 pixels wide, 8 fps,
+and 1.5× speed, looping indefinitely. It uses FFmpeg palette generation and
+Bayer dithering. `yam-dream-rollout.jpg` is a 960-pixel-wide poster at 45 seconds.
+The README and policy guides link previews to the full video, matching the
+existing gallery without relying on embedded HTML video playback.

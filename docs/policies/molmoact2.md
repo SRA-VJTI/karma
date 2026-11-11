@@ -5,6 +5,14 @@ Face snapshot and uses the checkpoint's `predict_action` implementation for
 normalization and model preprocessing. The existing external `/act` servers
 remain compatible with Karma's legacy client contract.
 
+## SO101 rollout
+
+[![MolmoAct2 placing a blue block in a box](../media/so101-molmoact2-rollout.jpg)](../media/so101-molmoact2-rollout.mp4)
+
+**[Watch the SO101 rollout · 22s](../media/so101-molmoact2-rollout.mp4)**
+
+MolmoAct2 policy execution on SO101, recorded with Karma.
+
 ## Prepare the GPU environment
 
 Use a separate [MolmoAct2 checkout](https://github.com/allenai/MolmoAct2) and its

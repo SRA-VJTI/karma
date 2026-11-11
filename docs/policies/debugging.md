@@ -61,10 +61,8 @@ They cover encoding, contract validation, blocked inference, stop/resume,
 handoff generations, and command dispatch. An offline passing suite does not
 validate GPU compatibility or physical manipulation success.
 
-Dream has also passed a real API probe and a physical recorded YAM rollout.
-MolmoAct2 and π0.5 end-to-end checks remain pending for this integration. Track
-deployment evidence separately from offline coverage in the
-[validation record](validation.md).
+For a recorded Dream example with its configuration and runtime artifacts, see
+the [Dream rollout record](validation.md).
 
 Deployment sequence: record versions → start/warm GPU server or SDK runtime →
 doctor → saved-observation probe → inspect calibration and camera mapping →

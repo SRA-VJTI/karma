@@ -10,11 +10,15 @@ and executes bounded absolute joint targets. The same client and scheduler power
 | π0.5 | Bimanual YAM, `robocurve/pi0.5-yam` transforms | Remote OpenPI GPU server | [π0.5](pi05.md) |
 | Dream | Bimanual YAM, joint outputs with optional pose assistance | Hosted API through an isolated SDK worker | [Dream](dream.md) |
 
-Dream API integration has been tested on physical bimanual YAM hardware with
-`dreamlabs/dream-1-beta`: a 120-second rollout recorded 3,593 frames and was marked
-successful by the operator on 2026-11-08. End-to-end validation of the maintained
-MolmoAct2 and π0.5 adapters remains pending. See the [validation record and
-remaining checks](validation.md) for the exact scope.
+## Rollout demos
+
+| SO101 · MolmoAct2 | YAM · Dream |
+| :---: | :---: |
+| [![MolmoAct2 placing a block in a box](../media/so101-molmoact2-rollout.gif)](../media/so101-molmoact2-rollout.mp4) | [![Dream folding a towel with three camera views](../media/yam-dream-rollout.gif)](../media/yam-dream-rollout.mp4) |
+| [Full video · 22s](../media/so101-molmoact2-rollout.mp4) · [Setup](molmoact2.md) | [Full video · 2 min](../media/yam-dream-rollout.mp4) · [Setup](dream.md) |
+
+Dream's recorded episode uses `dreamlabs/dream-1-beta` on bimanual YAM, with
+3,593 frames captured over 120 seconds. See the [episode details](validation.md).
 
 All maintained adapters live in this repository. Neither Spill nor Inspect Robots
 is a runtime dependency. The untracked FlowDagger `_fd.py` variants retain their

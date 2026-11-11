@@ -7,13 +7,21 @@ observations and action predictions; Karma owns hardware. This follows the
 currently links `/api-documentation`; direct documentation fetching returned its
 application shell, so SDK source was used to verify lifecycle details.
 
-## Install and authenticate
+## Towel-folding rollout
 
-**Tested on hardware:** `dreamlabs/dream-1-beta` passed doctor, an API prediction
-probe, and a recorded 120-second bimanual YAM rollout on 2026-11-08. The operator
-marked the towel-folding episode successful. See the [validation record](validation.md)
-for evidence and remaining checks; this does not establish validation of every
-checkpoint or every control path.
+[![Dream rollout with overhead and both wrist cameras](../media/yam-dream-rollout.gif)](../media/yam-dream-rollout.mp4)
+
+**[Watch the full rollout · 2 min](../media/yam-dream-rollout.mp4)**
+
+`dreamlabs/dream-1-beta` on bimanual YAM, prompted to **“fold the towel.”**
+The collage combines the overhead and both wrist cameras with the task prompt.
+The looping preview plays at 1.5× speed; the full recording plays at recorded speed.
+
+The API health check, prediction probe, and physical recorded rollout completed
+on 2026-11-08. Karma saved 3,593 frames over 120 seconds, and the operator marked
+the episode successful. See [episode details and artifacts](validation.md).
+
+## Install and authenticate
 
 From Karma's checkout:
 
