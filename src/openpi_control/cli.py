@@ -56,7 +56,7 @@ import sys
 import threading
 import time
 from contextlib import ExitStack
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
@@ -434,9 +434,7 @@ def run_doctor(
         CheckResult(
             _OK if cached else _WARN,
             "visual meshes",
-            str(cached)
-            if cached
-            else f"not cached — karma-viz --fetch-meshes --model {model}",
+            str(cached) if cached else f"not cached — karma-viz --fetch-meshes --model {model}",
         )
     )
 
@@ -806,9 +804,7 @@ def check_rig_interfaces(rig: Rig) -> CheckResult:
     for arm in rig.arms:
         # Resolve serial symlinks too, so by-id and tty names cannot open one bus twice.
         interface = (
-            str(Path(arm.interface).resolve())
-            if arm.interface.startswith("/")
-            else arm.interface
+            str(Path(arm.interface).resolve()) if arm.interface.startswith("/") else arm.interface
         )
         if interface in owners:
             return CheckResult(
@@ -3161,6 +3157,11 @@ def main(argv: list[str] | None = None) -> int:
         help="MolmoAct server URL or host:port; /act is appended automatically",
     )
     infer.add_argument(
+        "--flash-policy",
+        action="store_true",
+        help="use the task-specific Flash ACT contract and synchronous chunk blending",
+    )
+    infer.add_argument(
         "--instruction", required=True, help="language instruction sent with every observation"
     )
     infer.add_argument(
@@ -3971,19 +3972,23 @@ def _command_doctor(args: argparse.Namespace, log_path: Path) -> int:
     warnings = sum(1 for result in results if result.status == _WARN)
     print(f"\n{len(results)} checks, {failures} failed, {warnings} warned")
     print(f"log: {log_path}")
-    _write_doctor_report(args, log_path, [{
-        "name": args.model,
-        "model": args.model,
-        "interface": args.interface,
-        "effector": args.effector,
-        "checks": [asdict(result) for result in results],
-    }])
+    _write_doctor_report(
+        args,
+        log_path,
+        [
+            {
+                "name": args.model,
+                "model": args.model,
+                "interface": args.interface,
+                "effector": args.effector,
+                "checks": [asdict(result) for result in results],
+            }
+        ],
+    )
     return 1 if failures else 0
 
 
-def _write_doctor_report(
-    args: argparse.Namespace, log_path: Path, groups: list[dict]
-) -> None:
+def _write_doctor_report(args: argparse.Namespace, log_path: Path, groups: list[dict]) -> None:
     if args.report is None:
         return
     checks = [check for group in groups for check in group["checks"]]
@@ -4023,13 +4028,15 @@ def _doctor_rig(args: argparse.Namespace, log_path: Path) -> int:
             effector_model=rig_arm.effector_model,
             probe=args.probe and mapping.status != _FAIL,
         )
-        groups.append({
-            "name": rig_arm.name,
-            "model": rig_arm.model,
-            "interface": rig_arm.interface,
-            "effector": rig_arm.effector_model,
-            "checks": [asdict(result) for result in results],
-        })
+        groups.append(
+            {
+                "name": rig_arm.name,
+                "model": rig_arm.model,
+                "interface": rig_arm.interface,
+                "effector": rig_arm.effector_model,
+                "checks": [asdict(result) for result in results],
+            }
+        )
         failures += sum(1 for result in results if result.status == _FAIL)
         warnings += sum(1 for result in results if result.status == _WARN)
         print(f"\n{rig_arm.name} ({rig_arm.model} on {rig_arm.interface}):")
@@ -4356,6 +4363,25 @@ def _runtime_preflight(rig: Rig, *, camera_overrides=None) -> bool:
 def _command_infer(args: argparse.Namespace, log_path: Path) -> int:
     """Preflight and run the hardware-coupled MolmoAct2 loop."""
     rig = _configured_rig(args)
+    policy = None
+    if args.flash_policy:
+        from .flash_policy import CONTRACT, TAG, FlashChunkClient
+
+        if args.reach_actions or args.reset_start_pose or args.carry_targets:
+            raise ConfigurationError("Flash requires bounded execution without reset/carry targets")
+        if rig.policy_norm_tag not in (None, TAG):
+            raise ConfigurationError("Flash requires --norm-tag yam_flash_act_v1")
+        rig = replace(rig, policy_norm_tag=TAG)
+        if PolicyContract.from_rig(rig) != CONTRACT:
+            raise ConfigurationError("Flash requires the default bimanual YAM camera/arm contract")
+        args.prefetch = False
+        policy = FlashChunkClient(
+            args.server,
+            fps=args.control_rate,
+            instruction=args.instruction,
+            timeout_s=args.request_timeout,
+            jpeg_quality=args.jpeg_quality,
+        )
 
     overrides = cameras_mod.parse_camera_overrides(args.camera)
     if not args.skip_preflight and not _runtime_preflight(
@@ -4366,6 +4392,7 @@ def _command_infer(args: argparse.Namespace, log_path: Path) -> int:
     status = run_infer(
         rig,
         instruction=args.instruction,
+        policy=policy,
         server=args.server,
         request_timeout_s=args.request_timeout,
         num_steps=args.num_steps,

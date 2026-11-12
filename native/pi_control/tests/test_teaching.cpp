@@ -81,7 +81,7 @@ TEST(Teaching, PreservesDampingSignForInvertedGripper) {
         TeachingJoint p{}; p.damping = 0.1f;
         ASSERT_EQ(device.configure_teaching_joint(0, p), ReturnCode::SUCCESS);
         ASSERT_EQ(device.set_runtime_teaching(true), ReturnCode::SUCCESS);
-        ASSERT_EQ(device.apply_teaching_torques({0.3f}), ReturnCode::SUCCESS);
+        ASSERT_EQ(device.apply_teaching_torques({0.3f, 0.0f}), ReturnCode::SUCCESS);
         EXPECT_NEAR(device.servo->applied, 0.28f, 1e-6);
     }
 }

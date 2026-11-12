@@ -1,9 +1,12 @@
 # Flash-ALOHA on the default bimanual YAM rig
 
-This is the hardware bring-up stage of the port. The readiness checks and JSON
-report below are implemented. A Flash-style kinesthetic teaching mode, calibrated
-friction compensation, and Flash policy execution are **not implemented by this
-change**. Hardware validation is pending an operator run on the Linux workstation.
+This draft implements YAM kinesthetic teaching, explicit gripper backdriving,
+next-state demonstration recording, a task-specific ACT training/server path,
+shared operator masking and overlapping action chunks. It also includes
+[parametric scissor-style grip CAD](../hardware/scissor/README.md).
+Physical hardware validation, per-arm friction calibration, mounting fit and
+training on real demonstrations are still operator work. No ARX gains or
+checkpoints are treated as YAM-compatible.
 
 ## Target and approach
 
@@ -108,49 +111,138 @@ left/right bus identity, payload/mount details, motor fault observations, joint
 sign/zero observations and gravity-float drift. Camera serials are local setup
 details; the packaged serials are placeholders.
 
-## 3. Next implementation: kinesthetic teaching and recording
+## 3. Kinesthetic teaching and recording
 
-The required native change is a dedicated teaching mode, not a wrapper that
-repeatedly re-enters calibration float. Integration points:
+Rebuild the native runtime from this branch. An old binary reports no teaching
+capability and is rejected before entering teaching. The normal YAM six joints
+and E_Yam gripper each use a measured-velocity friction profile:
 
-- `native/pi_control/src/pi_device_arm.cpp`: gravity and per-joint bounded
-  friction compensation in the native loop. Use per-arm calibration, a smooth
-  sign transition/deadband near zero velocity, torque caps and retained feedback
-  age/thermal/communication protection. Validate release stability before higher
-  speed sweeps; overcompensation can drive motion without a hand on the arm.
-- `native/pi_control/src/pi_device_effector.cpp`: explicit backdrivable E_Yam
-  teaching behavior and an intentional transition back to position control.
-  The passive `E_Yam_Handle` is a different device; replacing the configured
-  E_Yam with that model does not make the follower gripper backdrivable.
-- `types.py`, `protocol.py`, `native.py`, `arms.py`: explicit teaching/hold
-  transitions and capability reporting. Rebase position targets to measured
-  positions when leaving teaching so an old command cannot pull the arm away.
-- `cli.py` and the recording source: a dedicated kinesthetic workflow, initially
-  with explicit episode start/stop controls. Preserve synchronized raw camera
-  frames and measured trajectories; define action alignment and dataset metadata
-  before training. A measured teaching trajectory is not an issued PD target.
+```text
+assist = clamp(coulomb * tanh(velocity / transition) + viscous * velocity,
+               -compensation_limit, +compensation_limit)
+torque = model_gravity + assist - damping * velocity
+```
 
-First validate one arm at low speed and no cameras, including loss of feedback,
-process exit, mode transitions and release stability. Then add both grippers,
-both arms, and synchronized camera recording. A foot pedal can start/end takes;
-it is not a substitute for the hardware stop. Quest teleop remains available for
-comparison, but is not required for hand-guided teaching.
+The gripper uses zero model gravity. Values are joint-frame quantities before
+Karma's existing `torq_rescale`; the code converts DM raw velocity direction
+correctly, including the inverted gripper. Native torque/thermal/communication
+protection remains active. Default profiles have **zero friction assistance**,
+0.1 damping and a 0.5 rad/s velocity guard. They do not claim calibrated zero
+friction. First validate gravity/payload, then tune each joint and each physical
+arm independently at low speed. Increase assistance only from measured resistance;
+check release stability at several poses. Configuration is immutable while active.
+The accepted assistance caps are 2 Nm per arm joint and 0.5 Nm for the gripper,
+not suggested tuning values.
 
-## 4. Then: policy pipeline
+Generate a local profile (will not overwrite an existing file), then practice:
 
-Keep a checkpoint contract for `[left q1..q6, left gripper, right q1..q6,
-right gripper]`, radians, camera roles, control/data rates and gripper polarity.
-Karma's native/wire gripper is 1=open while its dataset gripper is 0=open; convert
-exactly once at the relevant boundary. Match training and inference image
-preprocessing and operator masks; preserve original recordings and calibrate
-mask geometry for this YAM rig. Reusing ARX masks or checkpoints is not validated.
+```bash
+uv run karma teach --write-config yam-teaching.json
+uv run karma teach --rig yam_bimanual --arm left --config yam-teaching.json
+# Repeat right, then both:
+uv run karma teach --rig yam_bimanual --arm both --config yam-teaching.json
+```
 
-Implement the Flash action-smoothing/chunk-transition path with replay tests for
-continuity, timing, stale responses, bounded velocity/acceleration and stopping.
-Benchmark policy latency against the chosen action rate before enabling faster
-motions. First run an offline recorded-episode contract check, then a bounded
-low-speed rollout. Karma's existing MolmoAct2 endpoint is a useful separate
-baseline, not evidence that a Flash policy has been ported.
+Startup energizes and holds using Karma's normal startup, including gripper
+calibration; keep fingers clear until the console says ready. Type a key then
+Enter: `t` practice, `r` start/restart recording, `s` hold and save, `h`/`d` hold
+and discard, `q` hold and exit. Ctrl+C/exit de-energizes in place without parking;
+support the arms. No position targets are sent while teaching.
+
+A 250 ms lease is renewed by the recording/control loop, not the background
+heartbeat. Missed renewal, unknown/>100 ms joint feedback age, nonfinite state,
+joint limit violation or excessive velocity exits teaching to HOLD. HOLD rebases
+position targets to the measured pose. One native node protects each arm and its
+gripper; Python holds both on a detected fault. This is not a hardwired
+cross-arm emergency stop. An individual child gripper guard is observed by its
+parent on the next native tick. Validate stop/release behavior physically before
+normal use; retain the rig's independent hardware stop.
+
+After fitting the grip prototypes and validating both arms, record all cameras:
+
+```bash
+uv run karma teach --config yam-teaching.json --record \
+  --repo-id local/yam-cup --root data/yam-cup --task "pick up the cup" --fps 30 \
+  --camera-serial top=TOP_SERIAL \
+  --camera-serial left_wrist=LEFT_SERIAL --camera-serial right_wrist=RIGHT_SERIAL
+```
+
+For UVC cameras use `--camera top=/dev/videoN` etc. Camera identity overrides are
+required for the packaged placeholder serials. Raw RGB recordings remain intact.
+The shared recorder samples the most recent frames; this does not establish
+hardware-synchronized camera exposures.
+
+Each observation at t is labeled with **measured state at t+1**, not an unissued
+PD command. Grippers use dataset 0=open; the native/wire convention is 1=open.
+The final unpaired frame is dropped on save (the console's capture count includes
+that dropped frame). Single-frame takes produce no saved episode. Boundaries
+never share pending frames. `meta/teaching.json` records profiles, ordering and
+alignment; `action.dt_s` records actual intervals. The trainer rejects sampled
+intervals outside 0.5–1.5 nominal periods; inspect timing before collecting at
+higher rates. Save is performed after HOLD, before slow video finalization.
+
+## 4. Train and serve ACT
+
+Copy [yam-act.json](../examples/flash/yam-act.json) and set the exact task, fps,
+image size and operator masks for this rig. Each mask is a normalized RGB-frame
+rectangle `[x0,y0,x1,y1]`; empty lists apply no masks. Inspect camera snapshots to
+choose rectangles that exclude hands/handles without hiding the task object.
+Masking is fixed geometry, not automatic operator segmentation. The same function
+masks, resizes and applies ImageNet RGB normalization in training and serving.
+
+Train on a GPU machine using Karma's pinned LeRobot 0.6.1 and an appropriate CUDA
+PyTorch installation. The workstation's default `uv` configuration uses CPU
+PyTorch wheels; it does not provision a training GPU. A first training run also
+downloads torchvision ResNet18 ImageNet initialization. No cloud service is
+created by these commands.
+
+```bash
+python -m openpi_control.flash_train \
+  --repo-id local/yam-cup --root data/yam-cup \
+  --config examples/flash/yam-act.json --output checkpoints/yam-cup \
+  --steps 20000 --batch-size 8 --device cuda
+python -m openpi_control.flash_serve \
+  --checkpoint checkpoints/yam-cup --device cuda --host 127.0.0.1 --port 8202
+```
+
+The trainer checks bimanual next-state metadata, uses action delta timestamps,
+normalizes the 14 state/action dimensions with saved dataset statistics, and
+trains LeRobot ACT. Its output includes weights, ACT config, `normalization.npz`,
+`flash.json` and training metadata. ACT is task-specific: the instruction must
+exactly match its one training task. This is an initial fixed-step trainer; it
+has no held-out success estimator or automatic checkpoint selection. Evaluate
+recorded predictions and task success before choosing a checkpoint for use.
+
+Serving defaults to loopback. Use an SSH tunnel for a remote GPU, for example
+`ssh -L 8202:127.0.0.1:8202 GPU_HOST`, then on the robot workstation:
+
+```bash
+uv run karma infer --rig yam_bimanual --flash-policy \
+  --server http://127.0.0.1:8202 --instruction "pick up the cup" \
+  --control-rate 30 --request-timeout 2 --speed 0.25 --no-park \
+  --camera-serial top=TOP_SERIAL \
+  --camera-serial left_wrist=LEFT_SERIAL --camera-serial right_wrist=RIGHT_SERIAL
+```
+
+Check `/act` health before powering up: exact YAM dimension, camera ordering,
+polarity, task and fps must agree. State/action order is `[left q1..q6, left
+gripper, right q1..q6, right gripper]`, radians plus normalized grippers. Serving
+converts native grippers to dataset polarity and predicted actions back exactly
+once. It clips predicted grippers to [0,1].
+
+The client retains the unexecuted suffix, blends the next plan's first overlap
+with cubic old-plan decay, and executes only the configured prefix. Unlike the
+reference's cubic implementation, the last overlap sample lands exactly on the
+new plan. Zeros are valid targets. Karma's bounded executor continues to enforce
+position-step limits; blending is not an acceleration/jerk guarantee.
+
+This first integration uses **synchronous inference** and holds the last position
+while waiting for the next chunk. Prefetch is disabled for this path so overlap
+indices have explicit meaning. It rejects reach-actions, carry-targets and the
+MolmoAct-specific reset pose. Slow rollout and executor clamping further change
+wall-clock timing. It is not a validated near-human-speed reproduction of
+Flash-ALOHA; benchmark latency and physical tracking before increasing speed.
+No trained YAM policy or task-success claim is included.
 
 Reference inspection: Karma `66bcd5ed1caa3f21d0f5bf61cd57d052b62ddad2`,
 Flash-ALOHA `4172a8ed8cadb6eeb4a59285826e83cb00a2f01c`.

@@ -1,0 +1,56 @@
+{
+  "units": "mm",
+  "fit_status": "prototype_measure_mount_before_printing",
+  "parts": {
+    "right_thumb_grip": {
+      "solids": 1,
+      "volume_mm3": 12214.719734667102,
+      "bounds_mm": [
+        48.00542135973066,
+        91.00563246104647,
+        8.009457634270166
+      ],
+      "estimated_petg_g_at_1_27_g_cm3_solid": 15.51269406302722
+    },
+    "right_finger_grip": {
+      "solids": 1,
+      "volume_mm3": 12923.355680878969,
+      "bounds_mm": [
+        54.00819801695438,
+        89.00780143545802,
+        8.014588746085998
+      ],
+      "estimated_petg_g_at_1_27_g_cm3_solid": 16.412661714716293
+    },
+    "left_thumb_grip": {
+      "solids": 1,
+      "volume_mm3": 12214.719734667102,
+      "bounds_mm": [
+        48.00542135973066,
+        91.00563246104647,
+        8.009457634270166
+      ],
+      "estimated_petg_g_at_1_27_g_cm3_solid": 15.51269406302722
+    },
+    "left_finger_grip": {
+      "solids": 1,
+      "volume_mm3": 12923.355680878969,
+      "bounds_mm": [
+        54.00819801695438,
+        89.00780143545802,
+        8.014588746085998
+      ],
+      "estimated_petg_g_at_1_27_g_cm3_solid": 16.412661714716293
+    },
+    "fit_coupon": {
+      "solids": 1,
+      "volume_mm3": 5401.887426756472,
+      "bounds_mm": [
+        26.00180728782278,
+        30.00180728782278,
+        8.001807287822778
+      ],
+      "estimated_petg_g_at_1_27_g_cm3_solid": 6.86039703198072
+    }
+  }
+}

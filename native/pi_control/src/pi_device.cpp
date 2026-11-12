@@ -62,7 +62,7 @@ ReturnCode Device::runtime_hold() {
 ReturnCode Device::configure_teaching_joint(int index, const TeachingJoint& config) {
     if (!supports_teaching()) return ReturnCode::NOT_SUPPORTED;
     if (teaching_active_ || rejects_direct_commands()) return ReturnCode::BUSY;
-    if (index < 0 || index >= (int)static_cast<size_t>(dof_) ||
+    if (index < 0 || index >= dof_ ||
         !config.valid(model_ == "E_Yam" ? 0.5f : 2.0f)) return ReturnCode::INVALID_PARAM;
     teaching_joints_.resize(static_cast<size_t>(dof_));
     teaching_joints_[index] = config;
@@ -106,7 +106,10 @@ ReturnCode Device::renew_teaching() {
 }
 
 ReturnCode Device::apply_teaching_torques(const std::vector<float>& gravity) {
-    if (gravity.size() != static_cast<size_t>(dof_)) return ReturnCode::INVALID_PARAM;
+    if (!teaching_active_ || teaching_joints_.size() != static_cast<size_t>(dof_))
+        return ReturnCode::BUSY;
+    // Arm gravity buffers include an effector slot; this device owns only dof_ joints.
+    if (gravity.size() < static_cast<size_t>(dof_)) return ReturnCode::INVALID_PARAM;
     bool stop = std::chrono::steady_clock::now() - teaching_renewed_ > std::chrono::milliseconds(250);
     for (size_t i = 0; i < static_cast<size_t>(dof_); ++i) {
         auto* joint = teaching_joint(i);
