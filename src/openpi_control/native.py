@@ -929,6 +929,7 @@ class NativeArmBackend(ArmBackend):
         timeout_s: float = 3.0,
         *,
         request_id: int | None = None,
+        retry_interval_s: float = 0.2,
     ) -> None:
         with self._lifecycle_lock:
             with self._condition:
@@ -954,7 +955,7 @@ class NativeArmBackend(ArmBackend):
                             raise ProtocolError(
                                 f"timed out waiting for {command.name} acknowledgement"
                             )
-                        self._condition.wait(min(remaining, 0.2))
+                        self._condition.wait(min(remaining, retry_interval_s))
                     result = self._acks.pop(request_id)
             finally:
                 with self._condition:
@@ -997,9 +998,7 @@ class NativeArmBackend(ArmBackend):
             self._raise_if_hardware_fault()
             if self._closed or not self._running:
                 if self._reader_error is not None:
-                    raise NativeProcessError(
-                        f"native protocol reader failed: {self._reader_error}"
-                    )
+                    raise NativeProcessError(f"native protocol reader failed: {self._reader_error}")
                 raise NativeProcessError("native process is not running")
             while self._inputs is None:
                 self._raise_if_hardware_fault()
@@ -1118,7 +1117,7 @@ class NativeArmBackend(ArmBackend):
     def renew_teaching(self) -> None:
         # Renewed by the capture/control loop, never by the generic heartbeat
         # thread: a stalled recording loop must lose its native 250 ms lease.
-        self._send_lifecycle(NativeCommand.RENEW_TEACHING, timeout_s=0.15)
+        self._send_lifecycle(NativeCommand.RENEW_TEACHING, timeout_s=0.15, retry_interval_s=0.01)
 
     def servo_reports(self) -> dict[int, JointServoReport]:
         with self._condition:

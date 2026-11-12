@@ -342,4 +342,6 @@ jobs:
           OPENPI_CONTROL_NODE: ${{ github.workspace }}/build-sil/native/pi_control/pi_control_node
           OPENPI_SIL_VCAN: vcan0
           OPENPI_SIL_VCAN2: vcan1
-        run: uv run --no-sync pytest -q tests/sil
+        run: |
+          uv run --no-sync pytest -q tests/sil -k yam_teaching
+          uv run --no-sync pytest -q tests/sil

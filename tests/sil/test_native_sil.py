@@ -1738,7 +1738,12 @@ def test_yam_teaching_arm_and_gripper_lease_returns_to_hold(fake_bus_with_grippe
         follower.enter_teaching()
         deadline = time.monotonic() + 0.5
         while time.monotonic() < deadline:
-            follower.renew_teaching()
+            try:
+                follower.renew_teaching()
+            except Exception:
+                print("".join(follower._backend._log_lines))
+                print("servo commands:", {m: bus.last_command(m) for m in range(1, 8)})
+                raise
             time.sleep(0.03)
         assert follower.read_state(timeout_s=2).mode is ArmMode.TEACHING
         for motor in range(1, 8):
