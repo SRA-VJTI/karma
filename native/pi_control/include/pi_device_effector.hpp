@@ -37,6 +37,7 @@ class DeviceEffector : public Device {
      * @brief Destructor.
      */
     ~DeviceEffector();
+    Joint* teaching_joint(size_t index) override { return joints_.at(index).get(); }
     bool supports_teaching() const override {
         return model_ == "E_Yam" && role_ == Role::FOLLOWER && joints_.size() == 1;
     }

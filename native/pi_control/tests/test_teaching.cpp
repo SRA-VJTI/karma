@@ -23,10 +23,12 @@ class TeachingServo : public ServoDm {
 
 class TeachingDevice : public Device {
  public:
+    std::vector<std::unique_ptr<Joint>> joints_;
     TeachingServo* servo;
     bool rebased = false;
     explicit TeachingDevice(const CommandLineArgs& cla) : Device(cla) {
         role_ = Role::FOLLOWER;
+        dof_ = 1;
         auto joint = std::make_unique<Joint>(this, nullptr);
         auto motor = std::make_unique<TeachingServo>(this, joint.get());
         servo = motor.get();
@@ -34,6 +36,7 @@ class TeachingDevice : public Device {
         joints_.push_back(std::move(joint));
     }
     bool supports_teaching() const override { return true; }
+    Joint* teaching_joint(size_t index) override { return joints_.at(index).get(); }
     void expire() { teaching_renewed_ -= std::chrono::seconds(1); }
     ReturnCode apply_action(const MsgJoints&) override { return ReturnCode::SUCCESS; }
     ReturnCode get_observation(MsgJoints&) override { return ReturnCode::SUCCESS; }

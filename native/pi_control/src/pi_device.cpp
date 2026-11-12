@@ -62,9 +62,9 @@ ReturnCode Device::runtime_hold() {
 ReturnCode Device::configure_teaching_joint(int index, const TeachingJoint& config) {
     if (!supports_teaching()) return ReturnCode::NOT_SUPPORTED;
     if (teaching_active_ || rejects_direct_commands()) return ReturnCode::BUSY;
-    if (index < 0 || index >= (int)joints_.size() ||
+    if (index < 0 || index >= (int)static_cast<size_t>(dof_) ||
         !config.valid(model_ == "E_Yam" ? 0.5f : 2.0f)) return ReturnCode::INVALID_PARAM;
-    teaching_joints_.resize(joints_.size());
+    teaching_joints_.resize(static_cast<size_t>(dof_));
     teaching_joints_[index] = config;
     teaching_joints_[index].configured = true;
     return ReturnCode::SUCCESS;
@@ -74,9 +74,9 @@ ReturnCode Device::set_runtime_teaching(bool enabled) {
     if (!enabled) return runtime_hold();
     if (!supports_teaching()) return ReturnCode::NOT_SUPPORTED;
     if (rejects_direct_commands() || gravity_float_active_) return ReturnCode::BUSY;
-    if (teaching_joints_.size() != joints_.size()) return ReturnCode::INVALID_PARAM;
-    for (size_t i = 0; i < joints_.size(); ++i) {
-        auto& joint = joints_[i];
+    if (teaching_joints_.size() != static_cast<size_t>(dof_)) return ReturnCode::INVALID_PARAM;
+    for (size_t i = 0; i < static_cast<size_t>(dof_); ++i) {
+        auto* joint = teaching_joint(i);
         const auto& config = teaching_joints_[i];
         const float q = joint->get_pos_rad_relative(), v = joint->get_vel_rad_sec();
         if (!config.configured || !config.valid(model_ == "E_Yam" ? 0.5f : 2.0f) ||
@@ -106,10 +106,10 @@ ReturnCode Device::renew_teaching() {
 }
 
 ReturnCode Device::apply_teaching_torques(const std::vector<float>& gravity) {
-    if (gravity.size() != joints_.size()) return ReturnCode::INVALID_PARAM;
+    if (gravity.size() != static_cast<size_t>(dof_)) return ReturnCode::INVALID_PARAM;
     bool stop = std::chrono::steady_clock::now() - teaching_renewed_ > std::chrono::milliseconds(250);
-    for (size_t i = 0; i < joints_.size(); ++i) {
-        auto& joint = joints_[i];
+    for (size_t i = 0; i < static_cast<size_t>(dof_); ++i) {
+        auto* joint = teaching_joint(i);
         const float q = joint->get_pos_rad_relative(), v = joint->get_vel_rad_sec();
         stop = stop || !std::isfinite(q) || !std::isfinite(v) || !std::isfinite(gravity[i]) ||
                q < joint->get_pos_min_relative() || q > joint->get_pos_max_relative() ||
@@ -120,8 +120,8 @@ ReturnCode Device::apply_teaching_torques(const std::vector<float>& gravity) {
         PI_WARN("%s_%s: teaching lease/state/velocity guard; returning to HOLD", model_.c_str(), id_.c_str());
         return runtime_hold();
     }
-    for (size_t i = 0; i < joints_.size(); ++i) {
-        auto& joint = joints_[i];
+    for (size_t i = 0; i < static_cast<size_t>(dof_); ++i) {
+        auto* joint = teaching_joint(i);
         // DM feedback velocity is raw motor-frame (unlike relative position).
         // Convert to joint frame for the profile, then back for the motor.
         const float direction = joint->get_dir_invert();

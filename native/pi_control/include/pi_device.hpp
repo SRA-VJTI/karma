@@ -700,6 +700,7 @@ class Device {
     virtual ReturnCode runtime_hold();
 
     virtual bool supports_teaching() const { return false; }
+    virtual Joint* teaching_joint(size_t) { return nullptr; }
     virtual ReturnCode configure_teaching_joint(int index, const TeachingJoint& config);
     virtual ReturnCode set_runtime_teaching(bool enabled);
     virtual ReturnCode renew_teaching();

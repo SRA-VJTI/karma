@@ -170,6 +170,7 @@ class DeviceArm : public Device {
     ReturnCode publish_next_servo_param() override;
 
     ReturnCode runtime_hold() override;
+    Joint* teaching_joint(size_t index) override { return joints_.at(index).get(); }
     bool supports_teaching() const override {
         return model_ == "Yam" && supports_gravity_float() && p_effector_ &&
                p_effector_->supports_teaching();
