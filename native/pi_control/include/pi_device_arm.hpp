@@ -170,6 +170,13 @@ class DeviceArm : public Device {
     ReturnCode publish_next_servo_param() override;
 
     ReturnCode runtime_hold() override;
+    bool supports_teaching() const override {
+        return model_ == "Yam" && supports_gravity_float() && p_effector_ &&
+               p_effector_->supports_teaching();
+    }
+    ReturnCode configure_teaching_joint(int index, const TeachingJoint& config) override;
+    ReturnCode set_runtime_teaching(bool enabled) override;
+    ReturnCode renew_teaching() override;
 
     /*!
      * @brief UI-facing progress estimate for any active move-to-ready.

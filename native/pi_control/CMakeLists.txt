@@ -143,6 +143,7 @@ if(OPENPI_CONTROL_BUILD_TESTING)
     tests/test_command_line_args.cpp
     tests/test_driver_can_mit.cpp
     tests/test_topic_zmq.cpp
+    tests/test_teaching.cpp
     ${PI_TOPIC_ZMQ_TEST_SOURCES}
   )
   target_compile_definitions(pi_topic_zmq_tests PRIVATE OPENPI_CONTROL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

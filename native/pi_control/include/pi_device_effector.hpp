@@ -37,6 +37,9 @@ class DeviceEffector : public Device {
      * @brief Destructor.
      */
     ~DeviceEffector();
+    bool supports_teaching() const override {
+        return model_ == "E_Yam" && role_ == Role::FOLLOWER && joints_.size() == 1;
+    }
 
     //
     // Override functions

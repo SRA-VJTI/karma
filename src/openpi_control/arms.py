@@ -131,6 +131,8 @@ class FollowerArm(_Arm):
             self._backend.command(command)
 
     def _validate_command(self, command: PositionCommand) -> None:
+        if self.mode is ArmMode.TEACHING:
+            raise CommandRejectedError("position commands are disabled during kinesthetic teaching")
         if command.position_rad.size != self.capabilities.dof:
             raise CommandRejectedError(
                 f"command DOF {command.position_rad.size} does not match {self.name} DOF "
@@ -142,6 +144,26 @@ class FollowerArm(_Arm):
     def hold(self) -> None:
         with self._dispatch_lock:
             self._backend.hold()
+
+    def configure_teaching(self, profile) -> None:
+        from .teaching import TeachingProfile
+
+        if not isinstance(profile, TeachingProfile):
+            raise ConfigurationError("teaching requires a validated TeachingProfile")
+        with self._dispatch_lock:
+            if not self.capabilities.supports_teaching:
+                raise ConfigurationError("native runtime does not support YAM teaching; rebuild it")
+            self._backend.configure_teaching(profile.wire_values())
+
+    def enter_teaching(self) -> None:
+        with self._dispatch_lock:
+            if not self.capabilities.supports_teaching:
+                raise ConfigurationError("native runtime does not support YAM teaching; rebuild it")
+            self._backend.enter_teaching()
+
+    def renew_teaching(self) -> None:
+        with self._dispatch_lock:
+            self._backend.renew_teaching()
 
     def enter_gravity_compensation(self, drift_abort_rad: float | None = None) -> None:
         """Calibration gravity float: the arm rests on the gravity feed-forward alone.

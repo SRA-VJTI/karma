@@ -64,6 +64,10 @@ ReturnCode DeviceEffector::set_control_mode(Role target_role,
         (target_role == Role::FOLLOWER);
     ReturnCode rc = ReturnCode::SUCCESS;
     if (use_follower_like) {
+        if (teaching_active_) {
+            teaching_active_ = false;
+            clear_command_buffers_for_move_to_ready();
+        }
         for (auto& p_joint : joints_) {
             rc = p_joint->change_control_mode_for_follower();
             if (rc != ReturnCode::SUCCESS) return rc;
@@ -1383,6 +1387,7 @@ ReturnCode DeviceEffector::move_to_ready_position() {
 }
 
 ReturnCode DeviceEffector::operate_as_follower() {
+    if (teaching_active_) return apply_teaching_torques(std::vector<float>(joints_.size(), 0.0f));
     if (is_read_only() == true) {
         // If the device is read only, skip the operate as follower
         return ReturnCode::SUCCESS;

@@ -32,6 +32,9 @@
 #define DEVICE_COMMAND_HOLD                        33
 #define DEVICE_COMMAND_HEARTBEAT                   34  ///< Client-liveness heartbeat; payload-free, arms the dead-client watchdog.
 #define DEVICE_COMMAND_SET_TORQ_RESCALE            35  ///< Runtime per-joint torq_rescale update (float params, one per arm joint).
+#define DEVICE_COMMAND_CONFIGURE_TEACHING          36
+#define DEVICE_COMMAND_ENTER_TEACHING              37
+#define DEVICE_COMMAND_RENEW_TEACHING              38
 
 #define DEVICE_INFO_READY_NOW 1  ///< Device is ready; param_int[0] is the completed lifecycle request id, if any.
 #define DEVICE_INFO_EFFECTOR  10 ///< Device info code indicating that the device is an effector.
@@ -78,6 +81,7 @@
 #define PI_CONTROL_CAP_GRAVITY_COMP        (1 << 2)
 #define PI_CONTROL_CAP_FORCE_FEEDBACK      (1 << 3)
 #define PI_CONTROL_CAP_MOVE_TO_READY       (1 << 4)
+#define PI_CONTROL_CAP_TEACHING            (1 << 5)
 
 // Source enum for DEVICE_INFO_READY_MOVE_IN_PROGRESS param_int[0]. Concrete devices pass
 // these via Device::publish_ready_move_progress() so Python can distinguish startup vs

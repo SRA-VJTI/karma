@@ -46,6 +46,7 @@ from .protocol import (
     CAP_GRAVITY_COMP,
     CAP_LIVE_INPUT,
     CAP_MOVE_TO_READY,
+    CAP_TEACHING,
     JOINT_STRUCT,
     PROTOCOL_VERSION,
     ArmTopics,
@@ -834,6 +835,7 @@ class NativeArmBackend(ArmBackend):
                     supports_gravity_compensation=bool(flags & CAP_GRAVITY_COMP),
                     supports_force_feedback=bool(flags & CAP_FORCE_FEEDBACK),
                     supports_move_to_ready=bool(flags & CAP_MOVE_TO_READY),
+                    supports_teaching=bool(flags & CAP_TEACHING),
                     button_names=self._input_layout.button_names,
                     axis_names=self._input_layout.axis_names,
                 )
@@ -1101,6 +1103,22 @@ class NativeArmBackend(ArmBackend):
         self._send_lifecycle(
             NativeCommand.SET_TORQ_RESCALE, floats=tuple(float(value) for value in values)
         )
+
+    def configure_teaching(self, joints: tuple[tuple[float, ...], ...]) -> None:
+        for index, values in enumerate(joints):
+            self._send_lifecycle(NativeCommand.CONFIGURE_TEACHING, floats=(float(index), *values))
+
+    def enter_teaching(self) -> None:
+        with self._mode_lock:
+            with self._condition:
+                reader = self._reader
+            self._send_lifecycle(NativeCommand.ENTER_TEACHING)
+            self._replace_mode(ArmMode.TEACHING, expected_reader=reader)
+
+    def renew_teaching(self) -> None:
+        # Renewed by the capture/control loop, never by the generic heartbeat
+        # thread: a stalled recording loop must lose its native 250 ms lease.
+        self._send_lifecycle(NativeCommand.RENEW_TEACHING, timeout_s=0.15)
 
     def servo_reports(self) -> dict[int, JointServoReport]:
         with self._condition:

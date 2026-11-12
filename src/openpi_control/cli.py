@@ -2875,6 +2875,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    teach = sub.add_parser("teach", help="hand-guide YAM arms with calibrated friction assistance")
+    teach.add_argument("--rig", choices=("yam_bimanual",), default="yam_bimanual")
+    teach.add_argument("--arm", choices=("both", "left", "right"), default="both")
+    teach.add_argument("--interface", action="append", metavar="ARM=BUS")
+    teach.add_argument("--config", type=Path, help="per-arm teaching JSON")
+    teach.add_argument("--write-config", type=Path, help="write an uncalibrated example and exit")
+    teach.add_argument("--record", action="store_true")
+    teach.add_argument("--repo-id")
+    teach.add_argument("--task")
+    teach.add_argument("--root", type=Path)
+    teach.add_argument("--fps", type=int, default=30)
+    teach.add_argument("--camera", action="append", metavar="ROLE=DEVICE")
+    teach.add_argument("--camera-serial", action="append", default=[], metavar="ROLE=SERIAL")
+
     doctor = sub.add_parser("doctor", help="read-only preflight checks for an arm or a rig")
     _add_common(doctor, required=False)
     doctor.add_argument(
@@ -3835,6 +3849,7 @@ def main(argv: list[str] | None = None) -> int:
     log_path = runlog.setup_run_logging(args.command)
 
     commands = {
+        "teach": _command_teach,
         "doctor": _command_doctor,
         "zero": _command_zero,
         "live": _command_live,
@@ -3929,6 +3944,12 @@ def _calibrated_teleop_config(rig, overrides=None):
                 [j["servos"][0]["pos_min"], j["servos"][0]["pos_max"]] for j in joints
             ]
     return config
+
+
+def _command_teach(args: argparse.Namespace, log_path: Path) -> int:
+    from .teaching import run_cli
+
+    return run_cli(args, log_path)
 
 
 def _command_doctor(args: argparse.Namespace, log_path: Path) -> int:

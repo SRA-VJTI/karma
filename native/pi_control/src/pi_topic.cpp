@@ -4,6 +4,7 @@
  */
 
 #include "pi_topic.hpp"
+#include <cmath>
 #include "pi_device.hpp"
 #include "pi_device_config.hpp"
 #include "pi_topic_zmq.hpp"
@@ -204,6 +205,25 @@ ReturnCode Topic::process_leader_msg(const MsgCommand& msg) {
     } else if (msg.command_ == DEVICE_COMMAND_HOLD) {
         if (p_device_ == nullptr) return ReturnCode::NOT_INITIALIZED;
         return p_device_->runtime_hold();
+
+    } else if (msg.command_ == DEVICE_COMMAND_CONFIGURE_TEACHING) {
+        if (p_device_ == nullptr) return ReturnCode::NOT_INITIALIZED;
+        if (msg.num_param_float_ != 7) return ReturnCode::INVALID_PARAM;
+        const auto& p = msg.param_float_;
+        if (!std::isfinite(p[0]) || p[0] < 0 || p[0] > 6 || p[0] != std::floor(p[0]))
+            return ReturnCode::INVALID_PARAM;
+        TeachingJoint config{p[1], p[2], p[3], p[4], p[5], p[6], true};
+        return p_device_->configure_teaching_joint(static_cast<int>(p[0]), config);
+
+    } else if (msg.command_ == DEVICE_COMMAND_ENTER_TEACHING) {
+        if (p_device_ == nullptr) return ReturnCode::NOT_INITIALIZED;
+        if (msg.num_param_float_ != 0) return ReturnCode::INVALID_PARAM;
+        return p_device_->set_runtime_teaching(true);
+
+    } else if (msg.command_ == DEVICE_COMMAND_RENEW_TEACHING) {
+        if (p_device_ == nullptr) return ReturnCode::NOT_INITIALIZED;
+        if (msg.num_param_float_ != 0) return ReturnCode::INVALID_PARAM;
+        return p_device_->renew_teaching();
 
     } else if (msg.command_ == DEVICE_COMMAND_SET_TORQ_RESCALE) {
         if (p_device_ == nullptr) return ReturnCode::NOT_INITIALIZED;
