@@ -18,12 +18,22 @@ from .inference import MOLMOACT_IMAGE_KEYS
 class Predictor:
     def __init__(self, checkpoint, device="cpu"):
         import torch
-        from lerobot.policies.act import ACTPolicy
+        from lerobot.policies.act import ACTConfig, ACTPolicy
 
         checkpoint = Path(checkpoint)
         self.config = FlashConfig(**json.loads((checkpoint / "flash.json").read_text()))
         self.device = device
-        self.policy = ACTPolicy.from_pretrained(checkpoint).to(device).eval()
+        policy_config = ACTConfig.from_pretrained(checkpoint, cli_overrides=[f"--device={device}"])
+        # The checkpoint contains the backbone. Serving must not download its
+        # training initialization or allocate on the training machine's device.
+        policy_config.pretrained_backbone_weights = None
+        self.policy = (
+            ACTPolicy.from_pretrained(
+                checkpoint, config=policy_config, strict=True, local_files_only=True
+            )
+            .to(device)
+            .eval()
+        )
         self.policy.reset()
         with np.load(checkpoint / "normalization.npz", allow_pickle=False) as archive:
             self.stats = {

@@ -149,8 +149,9 @@ Enter: `t` practice, `r` start/restart recording, `s` hold and save, `h`/`d` hol
 and discard, `q` hold and exit. Ctrl+C/exit de-energizes in place without parking;
 support the arms. No position targets are sent while teaching.
 
-A 250 ms lease is renewed by the recording/control loop, not the background
-heartbeat. Missed renewal, unknown/>100 ms joint feedback age, nonfinite state,
+A 250 ms lease is renewed by nonblocking sends from the recording/control loop,
+not the background heartbeat. Native teaching mode is reported repeatedly on the
+bounded status channel; renewal does not wait for per-frame acknowledgements. Missed renewal, unknown/>100 ms joint feedback age, nonfinite state,
 joint limit violation or excessive velocity exits teaching to HOLD. HOLD rebases
 position targets to the measured pose. One native node protects each arm and its
 gripper; Python holds both on a detected fault. This is not a hardwired

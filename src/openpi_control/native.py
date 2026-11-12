@@ -929,7 +929,6 @@ class NativeArmBackend(ArmBackend):
         timeout_s: float = 3.0,
         *,
         request_id: int | None = None,
-        retry_interval_s: float = 0.2,
     ) -> None:
         with self._lifecycle_lock:
             with self._condition:
@@ -955,7 +954,7 @@ class NativeArmBackend(ArmBackend):
                             raise ProtocolError(
                                 f"timed out waiting for {command.name} acknowledgement"
                             )
-                        self._condition.wait(min(remaining, retry_interval_s))
+                        self._condition.wait(min(remaining, 0.2))
                     result = self._acks.pop(request_id)
             finally:
                 with self._condition:
@@ -1115,9 +1114,12 @@ class NativeArmBackend(ArmBackend):
             self._replace_mode(ArmMode.TEACHING, expected_reader=reader)
 
     def renew_teaching(self) -> None:
-        # Renewed by the capture/control loop, never by the generic heartbeat
-        # thread: a stalled recording loop must lose its native 250 ms lease.
-        self._send_lifecycle(NativeCommand.RENEW_TEACHING, timeout_s=0.15, retry_interval_s=0.01)
+        # Loop-owned, best-effort liveness. Never wait for a status-channel ACK
+        # or renew in the background: missed sends expire the native lease.
+        with self._lifecycle_lock:
+            if not self._running or self._lifecycle_pub is None:
+                raise CommandRejectedError("arm is not connected")
+            self._lifecycle_pub.send(encode_command(NativeCommand.RENEW_TEACHING))
 
     def servo_reports(self) -> dict[int, JointServoReport]:
         with self._condition:

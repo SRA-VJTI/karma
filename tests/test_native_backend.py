@@ -546,9 +546,7 @@ def test_node_stdout_is_teed_to_persistent_log_file(fake_node, isolated_log_dir)
     fake_node("normal")
     backend = NativeArmBackend()
     try:
-        backend.connect(
-            make_backend_config(), ArmRole.FOLLOWER, topics_for("t-tee", "native-test")
-        )
+        backend.connect(make_backend_config(), ArmRole.FOLLOWER, topics_for("t-tee", "native-test"))
     finally:
         backend.close()
 
@@ -1183,7 +1181,9 @@ def test_consume_status_servo_param_populates_reports():
     floats = (-21.0, 21.0, -30.0, 30.0, -20.5, 20.5, -42.0, 42.0, 0.75)
     backend._consume_status(
         STATUS_STRUCT.pack(
-            int(NativeStatus.SERVO_PARAM), len(floats), 6,
+            int(NativeStatus.SERVO_PARAM),
+            len(floats),
+            6,
             *(floats + (0.0,) * (10 - len(floats))),
             *((1, 1, 1, 1, 40000, 1500) + (0,) * 4),
         )
@@ -1191,7 +1191,9 @@ def test_consume_status_servo_param_populates_reports():
     # A joint without a range query (DM wrist): valid flags 0 -> reported None.
     backend._consume_status(
         STATUS_STRUCT.pack(
-            int(NativeStatus.SERVO_PARAM), len(floats), 6,
+            int(NativeStatus.SERVO_PARAM),
+            len(floats),
+            6,
             *(floats + (0.0,) * (10 - len(floats))),
             *((3, 0, 0, 0, 25500, 800) + (0,) * 4),
         )
@@ -1287,9 +1289,7 @@ def test_concurrent_mode_transitions_are_serialized():
 
     backend._send_lifecycle = send_mode
     first = threading.Thread(
-        target=lambda: capture_error(
-            lambda: backend.set_mode(ArmMode.GRAVITY_COMPENSATION), errors
-        )
+        target=lambda: capture_error(lambda: backend.set_mode(ArmMode.GRAVITY_COMPENSATION), errors)
     )
     second = threading.Thread(target=set_bilateral)
 
@@ -1497,6 +1497,8 @@ def test_failed_native_connect_preserves_error_when_cleanup_fails(monkeypatch):
         assert close_attempts == 1
     finally:
         backend.close()
+
+
 def test_ready_during_move_requires_matching_request_id_and_new_state():
     backend = make_consuming_backend()
     backend._consume_state(pack_state([0.4] * 6, sequence=1))
@@ -2125,9 +2127,7 @@ class _ExitTimeoutProcess:
         return 0
 
 
-def _close_with_stub_process(
-    *, move_to_ready: bool, accept: bool = True
-) -> _ExitTimeoutProcess:
+def _close_with_stub_process(*, move_to_ready: bool, accept: bool = True) -> _ExitTimeoutProcess:
     backend = make_consuming_backend()
     backend._context.term()
     process = _ExitTimeoutProcess()
@@ -2384,27 +2384,24 @@ def _capture_error(callback, errors: list[BaseException]) -> None:
         errors.append(exc)
 
 
-def test_teaching_renewal_retries_lost_ack_without_state_notifications():
+def test_teaching_renewal_is_one_loop_owned_send_without_waiting_for_ack():
     backend = make_consuming_backend()
     sent = []
 
-    class LossyPublisher:
+    class NoAckPublisher:
         def send(self, payload):
             values = COMMAND_STRUCT.unpack(payload)
             sent.append((values[0], values[13]))
-            # No state stream wakes the condition; the short retry deadline
-            # must recover two dropped messages within the 150 ms budget.
-            if len(sent) == 3:
-                backend._consume_status(pack_status(NativeStatus.COMMAND_ACK, (values[13], 0)))
 
         def close(self):
             pass
 
-    backend._lifecycle_pub = LossyPublisher()
+    backend._lifecycle_pub = NoAckPublisher()
     backend._running = True
     try:
         backend.renew_teaching()
-        assert sent == [(NativeCommand.RENEW_TEACHING, 1)] * 3
+        assert sent == [(NativeCommand.RENEW_TEACHING, 0)]
+        assert backend._pending_ack_request_id is None
         assert backend._acks == {}
     finally:
         backend._running = False

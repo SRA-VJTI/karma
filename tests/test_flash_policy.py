@@ -158,6 +158,10 @@ def test_act_training_save_reload_and_http_contract(tmp_path):
     assert torch.isfinite(loss)
     loss.backward()
     optimizer.step()
+    # Serving must use its requested device and the complete checkpoint, without
+    # fetching the backbone initialization saved in a training configuration.
+    policy.config.device = "cuda"
+    policy.config.pretrained_backbone_weights = "not-a-real-backbone-weight"
     policy.save_pretrained(tmp_path)
     np.savez(tmp_path / "normalization.npz", **stats)
     (tmp_path / "flash.json").write_text(json.dumps(asdict(cfg)))

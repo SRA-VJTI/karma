@@ -313,6 +313,7 @@ class DeviceArm : public Device {
     int  servo_num_effector_ = 0;     ///< Number of servo motors in attached effector.
     bool is_ready_arm_       = false; ///< Flag indicating arm is in ready position.
 
+    int teaching_hold_reports_ = 0;  ///< Repeat a guard/hold transition on the lossy status channel.
     bool logged_effector_skip_in_recovery_ = false;  ///< Rate-limit the "skipping effector" log to once per recovery.
     bool logged_per_joint_read_fallback_   = false;  ///< Rate-limit the per-joint read fallback log to once per recovery.
 

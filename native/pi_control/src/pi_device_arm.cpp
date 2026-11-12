@@ -47,6 +47,7 @@ ReturnCode DeviceArm::set_control_mode(Role target_role, ControlModeIntent inten
     // - NORMAL_OPERATION: follow target_role (leader vs follower).
     //
     // The CAN device subclass may override hardware-specific behavior.
+    teaching_hold_reports_ = 0;
     const bool use_follower_like = (intent == ControlModeIntent::READY_MOVE_OVERRIDE) || (target_role == Role::FOLLOWER);
     ReturnCode rc = ReturnCode::SUCCESS;
 
@@ -166,6 +167,14 @@ ReturnCode DeviceArm::set_runtime_torq_rescale(const std::vector<float>& values)
 }
 
 ReturnCode DeviceArm::publish_next_servo_param() {
+    // Prefer live teaching mode over static servo calibration telemetry. A
+    // single transition packet can be lost on the bounded PUB/SUB channel.
+    if (!is_in_emergency_recovery() && !gravity_float_active_ &&
+        (teaching_active_ || teaching_hold_reports_ > 0)) {
+        std::vector<int> mode{teaching_active_ ? 9 : 2};
+        if (!teaching_active_) --teaching_hold_reports_;
+        return publish_device_info(DEVICE_INFO_RUNTIME_MODE, nullptr, &mode);
+    }
     if (joints_.empty()) {
         return ReturnCode::SUCCESS;
     }
@@ -205,6 +214,7 @@ ReturnCode DeviceArm::runtime_hold() {
         if (rc == ReturnCode::SUCCESS) rc = eff_rc;
     }
     if (was_teaching) {
+        teaching_hold_reports_ = 10;
         std::vector<int> mode{2};  // ArmMode.HOLD (append-only Python enum ABI)
         publish_device_info(DEVICE_INFO_RUNTIME_MODE, nullptr, &mode);
     }
@@ -228,6 +238,7 @@ ReturnCode DeviceArm::set_runtime_teaching(bool enabled) {
         runtime_hold();
         return rc;
     }
+    teaching_hold_reports_ = 0;
     std::vector<int> mode{9};  // ArmMode.TEACHING, appended after CLOSED
     publish_device_info(DEVICE_INFO_RUNTIME_MODE, nullptr, &mode);
     return ReturnCode::SUCCESS;
@@ -1291,6 +1302,7 @@ ReturnCode DeviceArm::process_follower_msg(const MsgJoints& msg_joints) {
 
 ReturnCode DeviceArm::apply_action(const MsgJoints& msg) {
     if (teaching_active_) return ReturnCode::BUSY;
+    teaching_hold_reports_ = 0;
     ReturnCode return_code = ReturnCode::SUCCESS;
 
     if (msg.joints_.size() != static_cast<size_t>(dof_total_)) {
