@@ -306,6 +306,8 @@ class TopicZmq : public Topic {
     zmq::socket_t sub_command_;         ///< Subscriber socket for command messages.
     zmq::socket_t sub_joystick_left_;   ///< Subscriber socket for left joystick messages.
     zmq::socket_t sub_joystick_right_; ///< Subscriber socket for right joystick messages.
+    int teaching_enter_request_id_ = 0;
+    ReturnCode teaching_enter_result_ = ReturnCode::SUCCESS;
     int control_frequency_;             ///< Control loop frequency in Hz.
     prof_time_msec_t control_period_;   ///< Control period duration in milliseconds.
     prof_time_t prev_time_;             ///< Timestamp of the previous sleep() call.

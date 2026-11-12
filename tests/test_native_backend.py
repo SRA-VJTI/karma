@@ -2406,3 +2406,48 @@ def test_teaching_renewal_is_one_loop_owned_send_without_waiting_for_ack():
     finally:
         backend._running = False
         backend.close()
+
+
+def test_state_notifications_do_not_flood_lifecycle_retries(monkeypatch):
+    class Clock:
+        def monotonic(self):
+            return 100.0  # notifications do not advance the resend clock
+
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+    monkeypatch.setattr("openpi_control.native.time", Clock())
+    backend = make_consuming_backend()
+    sent = []
+    first_send = threading.Event()
+    errors = []
+
+    class Publisher:
+        def send(self, payload):
+            sent.append(payload)
+            first_send.set()
+
+        def close(self):
+            pass
+
+    backend._lifecycle_pub = Publisher()
+    backend._running = True
+    command = threading.Thread(target=lambda: capture_error(backend.hold, errors))
+    try:
+        command.start()
+        assert first_send.wait(timeout=1)
+        for _ in range(20):
+            with backend._condition:
+                backend._condition.notify_all()
+            time.sleep(0.001)
+        backend._consume_status(pack_status(NativeStatus.COMMAND_ACK, (1, 0)))
+        command.join(timeout=1)
+        assert not command.is_alive()
+        assert not errors
+        assert len(sent) == 1
+    finally:
+        backend._running = False
+        with backend._condition:
+            backend._condition.notify_all()
+        command.join(timeout=1)
+        backend.close()

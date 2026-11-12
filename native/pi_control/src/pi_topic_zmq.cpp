@@ -298,7 +298,21 @@ ReturnCode TopicZmq::step() {
                                 for (int i = 0; i < zmq_msg->num_param_int; i++) {
                                     msg.param_int_.push_back(zmq_msg->param_int[i]);
                                 }
-                                const ReturnCode command_result = Topic::process_leader_msg(msg);
+                                const int request_id = msg.num_param_int_ > 0 ? msg.param_int_[0] : 0;
+                                const bool teaching_entry =
+                                    msg.command_ == DEVICE_COMMAND_ENTER_TEACHING && request_id > 0;
+                                ReturnCode command_result;
+                                if (teaching_entry && request_id <= teaching_enter_request_id_) {
+                                    // Replaying an ACK must never restart an expired lease.
+                                    command_result = request_id == teaching_enter_request_id_
+                                        ? teaching_enter_result_ : ReturnCode::BUSY;
+                                } else {
+                                    command_result = Topic::process_leader_msg(msg);
+                                    if (teaching_entry) {
+                                        teaching_enter_request_id_ = request_id;
+                                        teaching_enter_result_ = command_result;
+                                    }
+                                }
                                 // A stale renewal after a teaching guard is an expected
                                 // rejection, not a hardware fault that should start a ready
                                 // move. Preserve its negative ACK without escalating motion.
@@ -311,7 +325,6 @@ ReturnCode TopicZmq::step() {
                                      command_result == ReturnCode::INVALID_PARAM ||
                                      command_result == ReturnCode::NOT_SUPPORTED);
                                 if (!expected_rejection) record_result(command_result);
-                                const int request_id = msg.num_param_int_ > 0 ? msg.param_int_[0] : 0;
                                 std::vector<int> ack_data{request_id, static_cast<int>(command_result), msg.command_};
                                 p_device_->publish_device_info(DEVICE_INFO_COMMAND_ACK, nullptr, &ack_data);
                             }

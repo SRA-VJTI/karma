@@ -15,11 +15,10 @@ DeviceEffectorCan::DeviceEffectorCan(const CommandLineArgs& cla) : DeviceEffecto
 DeviceEffectorCan::~DeviceEffectorCan() {}
 
 ReturnCode DeviceEffectorCan::set_control_mode(Role target_role, ControlModeIntent intent) {
-    (void)target_role;
-    (void)intent;
     ramped_target_initialized_ = false;
-    // MIT-mode CAN devices: control-mode switching is not required here.
-    return ReturnCode::SUCCESS;
+    // Preserve device-level teaching cancellation and target rebasing even
+    // though MIT servo mode methods themselves are no-ops.
+    return DeviceEffector::set_control_mode(target_role, intent);
 }
 
 ReturnCode DeviceEffectorCan::move_joint_with_torque(Joint* p_joint, float target_pos) {

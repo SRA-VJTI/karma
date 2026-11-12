@@ -941,6 +941,12 @@ class NativeArmBackend(ArmBackend):
             try:
                 payload = encode_command(command, floats=floats, ints=(request_id,))
                 deadline = time.monotonic() + timeout_s
+                next_send = 0.0
+                retry_period = (
+                    0.02
+                    if command in {NativeCommand.ENTER_TEACHING, NativeCommand.CONFIGURE_TEACHING}
+                    else 0.2
+                )
                 with self._condition:
                     while request_id not in self._acks:
                         self._raise_if_hardware_fault()
@@ -948,13 +954,18 @@ class NativeArmBackend(ArmBackend):
                             raise self._stopped_process_error(
                                 "native process stopped before command acknowledgement"
                             )
-                        self._lifecycle_pub.send(payload)
-                        remaining = deadline - time.monotonic()
+                        now = time.monotonic()
+                        remaining = deadline - now
                         if remaining <= 0:
                             raise ProtocolError(
                                 f"timed out waiting for {command.name} acknowledgement"
                             )
-                        self._condition.wait(min(remaining, 0.2))
+                        # State/status notifications also wake this condition.
+                        # Do not turn every feedback frame into a queued retry.
+                        if now >= next_send:
+                            self._lifecycle_pub.send(payload)
+                            next_send = now + retry_period
+                        self._condition.wait(min(remaining, max(0, next_send - now)))
                     result = self._acks.pop(request_id)
             finally:
                 with self._condition:

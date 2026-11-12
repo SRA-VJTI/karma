@@ -1736,6 +1736,7 @@ def test_yam_teaching_arm_and_gripper_lease_returns_to_hold(fake_bus_with_grippe
         assert follower.capabilities.supports_teaching
         follower.configure_teaching(TeachingProfile(tuple(FrictionJoint() for _ in range(7))))
         follower.enter_teaching()
+        enter_request_id = follower._backend._request_id
         deadline = time.monotonic() + 0.5
         while time.monotonic() < deadline:
             try:
@@ -1765,3 +1766,15 @@ def test_yam_teaching_arm_and_gripper_lease_returns_to_hold(fake_bus_with_grippe
         time.sleep(0.1)
         assert follower.read_state(timeout_s=2).mode is ArmMode.HOLD
         assert "entering emergency recovery" not in "".join(follower._backend._log_lines)
+
+        from openpi_control.protocol import NativeCommand, encode_command
+
+        # An ENTER retry that was delayed in transport must not re-arm the
+        # expired lease. Only a new operator entry request may do that.
+        with follower._backend._lifecycle_lock:
+            follower._backend._lifecycle_pub.send(
+                encode_command(NativeCommand.ENTER_TEACHING, ints=(enter_request_id,))
+            )
+        time.sleep(0.3)
+        assert follower.read_state(timeout_s=2).mode is ArmMode.HOLD
+        assert all(bus.last_command(m)[2] > 0 for m in range(1, 8))

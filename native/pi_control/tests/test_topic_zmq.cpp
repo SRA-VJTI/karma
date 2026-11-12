@@ -44,6 +44,11 @@ class TestDevice : public Device {
     ReturnCode get_servo_ids(std::vector<int>&) override { return ReturnCode::SUCCESS; }
     ReturnCode set_control_mode(Role, ControlModeIntent) override { return ReturnCode::SUCCESS; }
 
+    ReturnCode set_runtime_teaching(bool enabled) override {
+        if (enabled) ++teaching_enter_count;
+        return ReturnCode::SUCCESS;
+    }
+    int teaching_enter_count = 0;
     int joint_action_count = 0;
     int joystick_action_count = 0;
     int follower_action_count = 0;
@@ -406,4 +411,26 @@ TEST(TopicZmqStep, RejectedTeachingRenewalDoesNotEscalateIntoRecoveryMotion) {
     EXPECT_EQ(topic.step(), ReturnCode::SUCCESS);
     EXPECT_FALSE(device.teaching_active());
     EXPECT_FALSE(device.is_in_emergency_recovery());
+}
+
+TEST(TopicZmqStep, TeachingEntryRetriesAreAcknowledgedWithoutReentering) {
+    CommandLineArgs cla = make_cla();
+    TestDevice device(cla, 1);
+    TopicZmq topic(&device, cla, 0, nullptr);
+    topic.sub_command_.close();
+    topic.sub_command_ = zmq::socket_t(topic.context_, ZMQ_PAIR);
+    const std::string endpoint = "inproc://teaching_duplicate_" + cla.device_id;
+    topic.sub_command_.bind(endpoint);
+    zmq::socket_t sender(topic.context_, ZMQ_PAIR);
+    sender.connect(endpoint);
+    ZmqCommand payload{};
+    payload.command = DEVICE_COMMAND_ENTER_TEACHING;
+    payload.num_param_int = 1;
+    for (int request_id : {10, 10, 9, 11}) {
+        payload.param_int[0] = request_id;
+        sender.send(zmq::buffer(topic.topic_lifecycle_), zmq::send_flags::sndmore);
+        sender.send(zmq::buffer(&payload, sizeof(payload)), zmq::send_flags::none);
+        EXPECT_EQ(topic.step(), ReturnCode::SUCCESS);
+        EXPECT_EQ(device.teaching_enter_count, request_id == 11 ? 2 : 1);
+    }
 }
