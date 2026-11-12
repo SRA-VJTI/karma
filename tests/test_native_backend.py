@@ -2382,3 +2382,30 @@ def _capture_error(callback, errors: list[BaseException]) -> None:
         callback()
     except BaseException as exc:  # noqa: BLE001 - test helper captures thread failures
         errors.append(exc)
+
+
+def test_teaching_renewal_retries_lost_ack_without_state_notifications():
+    backend = make_consuming_backend()
+    sent = []
+
+    class LossyPublisher:
+        def send(self, payload):
+            values = COMMAND_STRUCT.unpack(payload)
+            sent.append((values[0], values[13]))
+            # No state stream wakes the condition; the short retry deadline
+            # must recover two dropped messages within the 150 ms budget.
+            if len(sent) == 3:
+                backend._consume_status(pack_status(NativeStatus.COMMAND_ACK, (values[13], 0)))
+
+        def close(self):
+            pass
+
+    backend._lifecycle_pub = LossyPublisher()
+    backend._running = True
+    try:
+        backend.renew_teaching()
+        assert sent == [(NativeCommand.RENEW_TEACHING, 1)] * 3
+        assert backend._acks == {}
+    finally:
+        backend._running = False
+        backend.close()

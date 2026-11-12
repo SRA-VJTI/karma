@@ -388,3 +388,22 @@ TEST(TopicZmqInitializationDeathTest, RejectsNegativeControlFrequency) {
 }
 
 }  // namespace
+
+TEST(TopicZmqStep, RejectedTeachingRenewalDoesNotEscalateIntoRecoveryMotion) {
+    CommandLineArgs cla = make_cla();
+    TestDevice device(cla, 1);
+    TopicZmq topic(&device, cla, 0, nullptr);
+    topic.sub_command_.close();
+    topic.sub_command_ = zmq::socket_t(topic.context_, ZMQ_PAIR);
+    const std::string endpoint = "inproc://teaching_rejected_" + cla.device_id;
+    topic.sub_command_.bind(endpoint);
+    zmq::socket_t sender(topic.context_, ZMQ_PAIR);
+    sender.connect(endpoint);
+    ZmqCommand payload{};
+    payload.command = DEVICE_COMMAND_RENEW_TEACHING;
+    sender.send(zmq::buffer(topic.topic_lifecycle_), zmq::send_flags::sndmore);
+    sender.send(zmq::buffer(&payload, sizeof(payload)), zmq::send_flags::none);
+    EXPECT_EQ(topic.step(), ReturnCode::SUCCESS);
+    EXPECT_FALSE(device.teaching_active());
+    EXPECT_FALSE(device.is_in_emergency_recovery());
+}

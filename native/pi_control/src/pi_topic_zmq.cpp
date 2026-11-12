@@ -298,8 +298,19 @@ ReturnCode TopicZmq::step() {
                                 for (int i = 0; i < zmq_msg->num_param_int; i++) {
                                     msg.param_int_.push_back(zmq_msg->param_int[i]);
                                 }
-                                const ReturnCode command_result =
-                                    record_result(Topic::process_leader_msg(msg));
+                                const ReturnCode command_result = Topic::process_leader_msg(msg);
+                                // A stale renewal after a teaching guard is an expected
+                                // rejection, not a hardware fault that should start a ready
+                                // move. Preserve its negative ACK without escalating motion.
+                                const bool teaching_command =
+                                    msg.command_ == DEVICE_COMMAND_CONFIGURE_TEACHING ||
+                                    msg.command_ == DEVICE_COMMAND_ENTER_TEACHING ||
+                                    msg.command_ == DEVICE_COMMAND_RENEW_TEACHING;
+                                const bool expected_rejection = teaching_command &&
+                                    (command_result == ReturnCode::BUSY ||
+                                     command_result == ReturnCode::INVALID_PARAM ||
+                                     command_result == ReturnCode::NOT_SUPPORTED);
+                                if (!expected_rejection) record_result(command_result);
                                 const int request_id = msg.num_param_int_ > 0 ? msg.param_int_[0] : 0;
                                 std::vector<int> ack_data{request_id, static_cast<int>(command_result), msg.command_};
                                 p_device_->publish_device_info(DEVICE_INFO_COMMAND_ACK, nullptr, &ack_data);

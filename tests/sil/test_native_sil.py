@@ -1760,3 +1760,11 @@ def test_yam_teaching_arm_and_gripper_lease_returns_to_hold(fake_bus_with_grippe
             timeout_s=2,
             what="position hold for arm and gripper",
         )
+
+        from openpi_control.exceptions import CommandRejectedError
+
+        with pytest.raises(CommandRejectedError):
+            follower.renew_teaching()
+        time.sleep(0.1)
+        assert follower.read_state(timeout_s=2).mode is ArmMode.HOLD
+        assert "enter_emergency_recovery" not in "".join(follower._backend._log_lines)
