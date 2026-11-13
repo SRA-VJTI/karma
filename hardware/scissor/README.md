@@ -1,4 +1,12 @@
-# YAM scissor-style teaching grips — prototype
+# YAM scissor-style teaching grips
+
+**Use the [V2 Flash-style leads](v2/README.md)** for the jaw-mounted short thumb
+saddle, long finger lead, adjustable straps and removable split clamps. V2 includes
+mounted open/closed renders, both hand variants, STEP/STL exports and a clearance report.
+
+The original flat-loop prototype below is retained for comparison.
+
+## Original flat-loop prototype
 
 ![Grip preview](generated/preview.png)
 

@@ -1,0 +1,520 @@
+{
+  "reference": "i2rt linear_4310 + station D405 camera",
+  "units": "mm",
+  "method": "Conservative swept triangle-AABB pruning, then VTK surface intersection at 0.5 mm per jaw; rigid attachments only",
+  "limitations": [
+    "Swept bounds cover full interval; unresolved pairs use a discrete sampling grid",
+    "Source meshes are visual CAD approximations",
+    "Straps, liners, fasteners and external scene excluded",
+    "No physical fit or strength validation"
+  ],
+  "parts": {
+    "positive_jaw_cap": {
+      "watertight": true,
+      "consistent_winding": true,
+      "components": 1,
+      "positive_volume": true
+    },
+    "negative_jaw_cap": {
+      "watertight": true,
+      "consistent_winding": true,
+      "components": 1,
+      "positive_volume": true
+    },
+    "right_finger_lead": {
+      "watertight": true,
+      "consistent_winding": true,
+      "components": 1,
+      "positive_volume": true
+    },
+    "fit_coupon_base": {
+      "watertight": true,
+      "consistent_winding": true,
+      "components": 1,
+      "positive_volume": true
+    },
+    "left_thumb_lead": {
+      "watertight": true,
+      "consistent_winding": true,
+      "components": 1,
+      "positive_volume": true
+    },
+    "left_finger_lead": {
+      "watertight": true,
+      "consistent_winding": true,
+      "components": 1,
+      "positive_volume": true
+    },
+    "right_thumb_lead": {
+      "watertight": true,
+      "consistent_winding": true,
+      "components": 1,
+      "positive_volume": true
+    }
+  },
+  "parameters_sha256": "56ab04912972975849ca12f8bfc35d7fe36cee3db0ccc431e8ccf2047214a742",
+  "mesh_sha256": {
+    "positive_jaw_cap.stl": "c66c0d1f9f57f13f08e0be9af5dd30d4d5837da6bab5acd1a1f7bc3f7d898eb4",
+    "negative_jaw_cap.stl": "d177cb994174fd10d335f037dda8f95cd16f79537bc7e8ef1b1865277bf297c2",
+    "right_finger_lead.stl": "ceb41f4b420fb4f504d501a553add663d5f08afd4a1e69e2f5623a02f2783862",
+    "reference_thumb_strap.stl": "5892b8e4ee3886b83f63b344f03d19bcbc6ac7b0cb8cf0f615b7721eedec8bef",
+    "fit_coupon_base.stl": "773c50b87a180549373d640eedf64e6dfa7cf2692ed89362c8aa70bf2a58a844",
+    "reference_finger_strap_lower.stl": "8b418b3823289da052877a659b9620c8ca7d817ebc21534b1ee7b772d3c28f89",
+    "left_thumb_lead.stl": "dcc4be43992bb190713407bfd79999f2c10b637f087206b9d26c85ce47e913b8",
+    "reference_finger_strap_upper.stl": "69d5f5626e076e04d4633a6d85d86d30713b12037b524444f92eb4b632bb1c49",
+    "left_finger_lead.stl": "ec86e37c275481e75b3ddce366307046a9b85dff676fd2df1b56012c14b91c34",
+    "right_thumb_lead.stl": "ff393062152b0d31be731b8f5887efd1626cb3320747b354c87102f8cc9e4444"
+  },
+  "collision_events": [],
+  "pair_checks": [
+    {
+      "hand": "right",
+      "a": "right_thumb_lead",
+      "b": "gripper",
+      "candidate_faces": [
+        0,
+        8000
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "right",
+      "a": "right_thumb_lead",
+      "b": "tip_left",
+      "candidate_faces": [
+        0,
+        8000
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "right",
+      "a": "right_thumb_lead",
+      "b": "tip_right",
+      "candidate_faces": [
+        2458,
+        0
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "right",
+      "a": "right_thumb_lead",
+      "b": "camera",
+      "candidate_faces": [
+        405,
+        0
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "right",
+      "a": "right_finger_lead",
+      "b": "gripper",
+      "candidate_faces": [
+        0,
+        8000
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "right",
+      "a": "right_finger_lead",
+      "b": "tip_left",
+      "candidate_faces": [
+        2458,
+        0
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "right",
+      "a": "right_finger_lead",
+      "b": "tip_right",
+      "candidate_faces": [
+        0,
+        8000
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "right",
+      "a": "right_finger_lead",
+      "b": "camera",
+      "candidate_faces": [
+        518,
+        0
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "right",
+      "a": "negative_jaw_cap",
+      "b": "gripper",
+      "candidate_faces": [
+        0,
+        8000
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "right",
+      "a": "negative_jaw_cap",
+      "b": "tip_left",
+      "candidate_faces": [
+        0,
+        8000
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "right",
+      "a": "negative_jaw_cap",
+      "b": "tip_right",
+      "candidate_faces": [
+        0,
+        8000
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "right",
+      "a": "negative_jaw_cap",
+      "b": "camera",
+      "candidate_faces": [
+        3045,
+        0
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "right",
+      "a": "positive_jaw_cap",
+      "b": "gripper",
+      "candidate_faces": [
+        0,
+        8000
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "right",
+      "a": "positive_jaw_cap",
+      "b": "tip_left",
+      "candidate_faces": [
+        0,
+        8000
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "right",
+      "a": "positive_jaw_cap",
+      "b": "tip_right",
+      "candidate_faces": [
+        0,
+        8000
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "right",
+      "a": "positive_jaw_cap",
+      "b": "camera",
+      "candidate_faces": [
+        3263,
+        0
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "right",
+      "a": "right_thumb_lead",
+      "b": "right_finger_lead",
+      "candidate_faces": [
+        0,
+        65088
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "right",
+      "a": "right_thumb_lead",
+      "b": "negative_jaw_cap",
+      "candidate_faces": [
+        0,
+        11476
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "right",
+      "a": "right_thumb_lead",
+      "b": "positive_jaw_cap",
+      "candidate_faces": [
+        0,
+        11476
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "right",
+      "a": "right_finger_lead",
+      "b": "negative_jaw_cap",
+      "candidate_faces": [
+        0,
+        11476
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "right",
+      "a": "right_finger_lead",
+      "b": "positive_jaw_cap",
+      "candidate_faces": [
+        0,
+        11476
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "right",
+      "a": "negative_jaw_cap",
+      "b": "positive_jaw_cap",
+      "candidate_faces": [
+        0,
+        11476
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "right_thumb_lead",
+      "b": "gripper",
+      "candidate_faces": [
+        0,
+        8000
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "right_thumb_lead",
+      "b": "tip_left",
+      "candidate_faces": [
+        0,
+        8000
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "right_thumb_lead",
+      "b": "tip_right",
+      "candidate_faces": [
+        2458,
+        0
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "right_thumb_lead",
+      "b": "camera",
+      "candidate_faces": [
+        405,
+        0
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "right_finger_lead",
+      "b": "gripper",
+      "candidate_faces": [
+        0,
+        8000
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "right_finger_lead",
+      "b": "tip_left",
+      "candidate_faces": [
+        2458,
+        0
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "right_finger_lead",
+      "b": "tip_right",
+      "candidate_faces": [
+        0,
+        8000
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "right_finger_lead",
+      "b": "camera",
+      "candidate_faces": [
+        518,
+        0
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "negative_jaw_cap",
+      "b": "gripper",
+      "candidate_faces": [
+        0,
+        8000
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "negative_jaw_cap",
+      "b": "tip_left",
+      "candidate_faces": [
+        0,
+        8000
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "negative_jaw_cap",
+      "b": "tip_right",
+      "candidate_faces": [
+        0,
+        8000
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "negative_jaw_cap",
+      "b": "camera",
+      "candidate_faces": [
+        3045,
+        0
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "positive_jaw_cap",
+      "b": "gripper",
+      "candidate_faces": [
+        0,
+        8000
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "positive_jaw_cap",
+      "b": "tip_left",
+      "candidate_faces": [
+        0,
+        8000
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "positive_jaw_cap",
+      "b": "tip_right",
+      "candidate_faces": [
+        0,
+        8000
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "positive_jaw_cap",
+      "b": "camera",
+      "candidate_faces": [
+        3263,
+        0
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "right_thumb_lead",
+      "b": "right_finger_lead",
+      "candidate_faces": [
+        0,
+        50320
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "right_thumb_lead",
+      "b": "negative_jaw_cap",
+      "candidate_faces": [
+        0,
+        11476
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "right_thumb_lead",
+      "b": "positive_jaw_cap",
+      "candidate_faces": [
+        0,
+        11476
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "right_finger_lead",
+      "b": "negative_jaw_cap",
+      "candidate_faces": [
+        0,
+        11476
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "right_finger_lead",
+      "b": "positive_jaw_cap",
+      "candidate_faces": [
+        0,
+        11476
+      ],
+      "result": "no overlapping swept triangle bounds"
+    },
+    {
+      "hand": "left",
+      "a": "negative_jaw_cap",
+      "b": "positive_jaw_cap",
+      "candidate_faces": [
+        0,
+        11476
+      ],
+      "result": "no overlapping swept triangle bounds"
+    }
+  ],
+  "nominal_sampling_grid_count": 96,
+  "explicit_vtk_samples": 0,
+  "all_pairs_resolved_by_swept_bounds": true,
+  "checker_controls": {
+    "known_intersection_detected": true,
+    "crossing_motion_retained": true,
+    "separated_motion_pruned": true
+  },
+  "rigid_sweep_passed": true
+}

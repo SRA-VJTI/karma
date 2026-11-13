@@ -1,0 +1,5 @@
+# CAD exchange files are generated artifacts; review their parametric sources.
+hardware/scissor/**/generated/*.step -diff -whitespace linguist-generated=true
+hardware/scissor/**/generated/*.stl binary linguist-generated=true
+hardware/scissor/**/generated/*.glb binary linguist-generated=true
+hardware/scissor/**/generated/*.png binary linguist-generated=true
