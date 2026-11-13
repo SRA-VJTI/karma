@@ -37,6 +37,9 @@ class NativeCommand(IntEnum):
     HOLD = 33
     HEARTBEAT = 34
     SET_TORQ_RESCALE = 35
+    CONFIGURE_TEACHING = 36
+    ENTER_TEACHING = 37
+    RENEW_TEACHING = 38
 
 
 class NativeStatus(IntEnum):
@@ -56,6 +59,7 @@ CAP_LIVE_INPUT = 1 << 1
 CAP_GRAVITY_COMP = 1 << 2
 CAP_FORCE_FEEDBACK = 1 << 3
 CAP_MOVE_TO_READY = 1 << 4
+CAP_TEACHING = 1 << 5
 
 
 @dataclass(frozen=True, slots=True)

@@ -115,7 +115,7 @@ jobs:
       CCACHE_MAXSIZE: 500M
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
       ASAN_TEST_REGEX: >-
-        ^(DriverCanTransport.RejectsTruncatedFrames|DriverCanTransport.RejectsInvalidBuffersBeforeIo|DriverCanMitTransport.RejectsTruncatedReceivedFrames|DriverCanMitTransport.RejectsServoDataIndexOutsideReceiveCache|DriverCanMitTransport.SendCommandRejectsInvalidCanFrameBeforeWrite|ServoDmParser.*|TopicZmqPublishBoundsTest.*|TopicZmqStep.ReportsMalformedJointPayload|TopicZmqJoystickCount.RejectsInvalidCountsBeforeDispatch|DeviceConfigTest.MalformedJsonIsRejectedNotThrown)$
+        ^(Teaching.*|DriverCanTransport.RejectsTruncatedFrames|DriverCanTransport.RejectsInvalidBuffersBeforeIo|DriverCanMitTransport.RejectsTruncatedReceivedFrames|DriverCanMitTransport.RejectsServoDataIndexOutsideReceiveCache|DriverCanMitTransport.SendCommandRejectsInvalidCanFrameBeforeWrite|ServoDmParser.*|TopicZmqPublishBoundsTest.*|TopicZmqStep.ReportsMalformedJointPayload|TopicZmqJoystickCount.RejectsInvalidCountsBeforeDispatch|DeviceConfigTest.MalformedJsonIsRejectedNotThrown)$
       TSAN_TEST_REGEX: >-
         ^(DriverCanLifecycle.ConcurrentCloseDoesNotRetireSocketDuringSend|DriverCanLifecycle.ConcurrentCloseDoesNotRetireSocketDuringRead|DriverCanMitConcurrency.ConcurrentCloseAndSendCommandAreRaceFree|DriverCanMitConcurrency.ConcurrentCloseAndResetZeroPositionAreRaceFree|DriverCanMitConcurrency.ConcurrentCloseAndEnableAreRaceFree|DriverCanMitConcurrency.ConcurrentDmEnablesDoNotInterleaveHandshakes|DriverCanMitConcurrency.SendCommandDoesNotInterleaveEnableHandshake|DriverCanMitConcurrency.ResetDoesNotInterleaveEnableHandshake)$
     strategy:
@@ -342,4 +342,6 @@ jobs:
           OPENPI_CONTROL_NODE: ${{ github.workspace }}/build-sil/native/pi_control/pi_control_node
           OPENPI_SIL_VCAN: vcan0
           OPENPI_SIL_VCAN2: vcan1
-        run: uv run --no-sync pytest -q tests/sil
+        run: |
+          uv run --no-sync pytest -q tests/sil -k yam_teaching
+          uv run --no-sync pytest -q tests/sil

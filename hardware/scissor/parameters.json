@@ -1,0 +1,20 @@
+{
+  "units": "mm",
+  "fit_status": "prototype_measure_mount_before_printing",
+  "plate_width": 26.0,
+  "plate_length": 30.0,
+  "thickness": 8.0,
+  "mount_pitch": 14.0,
+  "mount_slot_length": 15.0,
+  "mount_slot_width": 3.4,
+  "neck_width": 16.0,
+  "ring_offset_x": 18.0,
+  "ring_offset_y": 56.0,
+  "ring_wall": 5.0,
+  "thumb_inner_width": 24.0,
+  "thumb_inner_length": 30.0,
+  "finger_inner_width": 36.0,
+  "finger_inner_length": 26.0,
+  "preview_closed_mount_separation": 38.0,
+  "reference_total_jaw_travel": 95.0
+}

@@ -1,0 +1,38 @@
+{
+  "right_thumb_lead": {
+    "step_readback_valid": true,
+    "solid_count": 1
+  },
+  "right_finger_lead": {
+    "step_readback_valid": true,
+    "solid_count": 1
+  },
+  "left_thumb_lead": {
+    "step_readback_valid": true,
+    "solid_count": 1
+  },
+  "left_finger_lead": {
+    "step_readback_valid": true,
+    "solid_count": 1
+  },
+  "negative_jaw_cap": {
+    "step_readback_valid": true,
+    "solid_count": 1
+  },
+  "positive_jaw_cap": {
+    "step_readback_valid": true,
+    "solid_count": 1
+  },
+  "fit_coupon_base": {
+    "step_readback_valid": true,
+    "solid_count": 1
+  },
+  "right_hand_assembly": {
+    "step_readback_valid": true,
+    "solid_count": 7
+  },
+  "left_hand_assembly": {
+    "step_readback_valid": true,
+    "solid_count": 4
+  }
+}

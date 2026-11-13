@@ -61,6 +61,15 @@ class ArmBackend(ABC):
         """Runtime per-joint torq_rescale update (calibration tools; no node restart)."""
         raise NotImplementedError
 
+    def configure_teaching(self, joints: tuple[tuple[float, ...], ...]) -> None:
+        raise NotImplementedError
+
+    def enter_teaching(self) -> None:
+        raise NotImplementedError
+
+    def renew_teaching(self) -> None:
+        raise NotImplementedError
+
     def servo_reports(self) -> dict[int, JointServoReport]:
         """Per-joint servo parameter reports received so far (may be incomplete)."""
         raise NotImplementedError

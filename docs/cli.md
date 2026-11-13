@@ -16,7 +16,7 @@ its complete flag set; this page is the map.
 
 | Command | Purpose |
 | --- | --- |
-| `doctor` | Read-only preflight for an arm or a rig: model assets, bus presence, servo registry, cameras. Opens no bus unless `--probe`. |
+| `doctor` | Read-only preflight: model assets, bus presence/ownership, CAN controller health, servo registry, cameras. `--probe` listens without transmitting; `--report PATH` saves JSON. |
 | `cameras` | Resolve a rig's cameras to devices and report presence. `--probe` opens each one and measures the delivered rate; `--snapshot DIR` writes a frame per view. |
 | `calibrate-so101` | SO101 calibration wizard: centre encoders (`--center-encoders`), record travel, gripper endpoints and home. Writes `calibration/NAME.json`. |
 | `so101-policy-frame` | Capture LeRobot's zero and rotated poses and write a `--policy-frame` file mapping Karma's radians onto a checkpoint trained on LeRobot degrees. Work in progress; see [inference](inference.md#policy-frames). |

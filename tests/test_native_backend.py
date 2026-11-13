@@ -546,9 +546,7 @@ def test_node_stdout_is_teed_to_persistent_log_file(fake_node, isolated_log_dir)
     fake_node("normal")
     backend = NativeArmBackend()
     try:
-        backend.connect(
-            make_backend_config(), ArmRole.FOLLOWER, topics_for("t-tee", "native-test")
-        )
+        backend.connect(make_backend_config(), ArmRole.FOLLOWER, topics_for("t-tee", "native-test"))
     finally:
         backend.close()
 
@@ -1183,7 +1181,9 @@ def test_consume_status_servo_param_populates_reports():
     floats = (-21.0, 21.0, -30.0, 30.0, -20.5, 20.5, -42.0, 42.0, 0.75)
     backend._consume_status(
         STATUS_STRUCT.pack(
-            int(NativeStatus.SERVO_PARAM), len(floats), 6,
+            int(NativeStatus.SERVO_PARAM),
+            len(floats),
+            6,
             *(floats + (0.0,) * (10 - len(floats))),
             *((1, 1, 1, 1, 40000, 1500) + (0,) * 4),
         )
@@ -1191,7 +1191,9 @@ def test_consume_status_servo_param_populates_reports():
     # A joint without a range query (DM wrist): valid flags 0 -> reported None.
     backend._consume_status(
         STATUS_STRUCT.pack(
-            int(NativeStatus.SERVO_PARAM), len(floats), 6,
+            int(NativeStatus.SERVO_PARAM),
+            len(floats),
+            6,
             *(floats + (0.0,) * (10 - len(floats))),
             *((3, 0, 0, 0, 25500, 800) + (0,) * 4),
         )
@@ -1287,9 +1289,7 @@ def test_concurrent_mode_transitions_are_serialized():
 
     backend._send_lifecycle = send_mode
     first = threading.Thread(
-        target=lambda: capture_error(
-            lambda: backend.set_mode(ArmMode.GRAVITY_COMPENSATION), errors
-        )
+        target=lambda: capture_error(lambda: backend.set_mode(ArmMode.GRAVITY_COMPENSATION), errors)
     )
     second = threading.Thread(target=set_bilateral)
 
@@ -1497,6 +1497,8 @@ def test_failed_native_connect_preserves_error_when_cleanup_fails(monkeypatch):
         assert close_attempts == 1
     finally:
         backend.close()
+
+
 def test_ready_during_move_requires_matching_request_id_and_new_state():
     backend = make_consuming_backend()
     backend._consume_state(pack_state([0.4] * 6, sequence=1))
@@ -2125,9 +2127,7 @@ class _ExitTimeoutProcess:
         return 0
 
 
-def _close_with_stub_process(
-    *, move_to_ready: bool, accept: bool = True
-) -> _ExitTimeoutProcess:
+def _close_with_stub_process(*, move_to_ready: bool, accept: bool = True) -> _ExitTimeoutProcess:
     backend = make_consuming_backend()
     backend._context.term()
     process = _ExitTimeoutProcess()
@@ -2382,3 +2382,72 @@ def _capture_error(callback, errors: list[BaseException]) -> None:
         callback()
     except BaseException as exc:  # noqa: BLE001 - test helper captures thread failures
         errors.append(exc)
+
+
+def test_teaching_renewal_is_one_loop_owned_send_without_waiting_for_ack():
+    backend = make_consuming_backend()
+    sent = []
+
+    class NoAckPublisher:
+        def send(self, payload):
+            values = COMMAND_STRUCT.unpack(payload)
+            sent.append((values[0], values[13]))
+
+        def close(self):
+            pass
+
+    backend._lifecycle_pub = NoAckPublisher()
+    backend._running = True
+    try:
+        backend.renew_teaching()
+        assert sent == [(NativeCommand.RENEW_TEACHING, 0)]
+        assert backend._pending_ack_request_id is None
+        assert backend._acks == {}
+    finally:
+        backend._running = False
+        backend.close()
+
+
+def test_state_notifications_do_not_flood_lifecycle_retries(monkeypatch):
+    class Clock:
+        def monotonic(self):
+            return 100.0  # notifications do not advance the resend clock
+
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+    monkeypatch.setattr("openpi_control.native.time", Clock())
+    backend = make_consuming_backend()
+    sent = []
+    first_send = threading.Event()
+    errors = []
+
+    class Publisher:
+        def send(self, payload):
+            sent.append(payload)
+            first_send.set()
+
+        def close(self):
+            pass
+
+    backend._lifecycle_pub = Publisher()
+    backend._running = True
+    command = threading.Thread(target=lambda: capture_error(backend.hold, errors))
+    try:
+        command.start()
+        assert first_send.wait(timeout=1)
+        for _ in range(20):
+            with backend._condition:
+                backend._condition.notify_all()
+            time.sleep(0.001)
+        backend._consume_status(pack_status(NativeStatus.COMMAND_ACK, (1, 0)))
+        command.join(timeout=1)
+        assert not command.is_alive()
+        assert not errors
+        assert len(sent) == 1
+    finally:
+        backend._running = False
+        with backend._condition:
+            backend._condition.notify_all()
+        command.join(timeout=1)
+        backend.close()

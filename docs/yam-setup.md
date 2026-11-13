@@ -94,8 +94,12 @@ uv run karma doctor --rig yam_bimanual --interface-override right=can_right --pr
 ```
 
 `doctor` is read-only. It checks the model assets, that each bus exists and is
-up, the servo registry, and (with `--probe`) that motors answer. Never run two
-robot processes on one bus.
+up, CAN controller health, distinct bus assignments and the servo registry.
+`--probe` only listens for traffic; it does not query motors or prove that every
+motor answers. A silent idle DM bus is normal. `--report logs/yam-bringup.json`
+saves these checks for troubleshooting. Never run two robot processes on one bus.
+
+For the staged kinesthetic-teaching port, see [Flash-ALOHA on YAM](flash-yam.md).
 
 ## 3. Zeros and home
 

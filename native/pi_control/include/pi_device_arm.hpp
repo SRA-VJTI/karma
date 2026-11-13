@@ -170,6 +170,14 @@ class DeviceArm : public Device {
     ReturnCode publish_next_servo_param() override;
 
     ReturnCode runtime_hold() override;
+    Joint* teaching_joint(size_t index) override { return joints_.at(index).get(); }
+    bool supports_teaching() const override {
+        return model_ == "Yam" && supports_gravity_float() && p_effector_ &&
+               p_effector_->supports_teaching();
+    }
+    ReturnCode configure_teaching_joint(int index, const TeachingJoint& config) override;
+    ReturnCode set_runtime_teaching(bool enabled) override;
+    ReturnCode renew_teaching() override;
 
     /*!
      * @brief UI-facing progress estimate for any active move-to-ready.
@@ -305,6 +313,7 @@ class DeviceArm : public Device {
     int  servo_num_effector_ = 0;     ///< Number of servo motors in attached effector.
     bool is_ready_arm_       = false; ///< Flag indicating arm is in ready position.
 
+    int teaching_hold_reports_ = 0;  ///< Repeat a guard/hold transition on the lossy status channel.
     bool logged_effector_skip_in_recovery_ = false;  ///< Rate-limit the "skipping effector" log to once per recovery.
     bool logged_per_joint_read_fallback_   = false;  ///< Rate-limit the per-joint read fallback log to once per recovery.
 

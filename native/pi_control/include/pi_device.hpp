@@ -4,6 +4,7 @@
  */
 
 #pragma once
+#include "pi_teaching.hpp"
 #include <algorithm>
 #include <chrono>
 #include <memory>
@@ -698,6 +699,14 @@ class Device {
 
     virtual ReturnCode runtime_hold();
 
+    virtual bool supports_teaching() const { return false; }
+    virtual Joint* teaching_joint(size_t) { return nullptr; }
+    virtual ReturnCode configure_teaching_joint(int index, const TeachingJoint& config);
+    virtual ReturnCode set_runtime_teaching(bool enabled);
+    virtual ReturnCode renew_teaching();
+    bool teaching_active() const { return teaching_active_; }
+    ReturnCode apply_teaching_torques(const std::vector<float>& gravity);
+
     /*!
      * @brief Records a client-liveness heartbeat (DEVICE_COMMAND_HEARTBEAT).
      *
@@ -840,6 +849,9 @@ class Device {
     /// in-loop runaway watchdog (drift from gravity_float_baseline_ beyond
     /// gravity_float_abort_rad_).
     bool gravity_float_active_ = false;
+    bool teaching_active_ = false;
+    std::vector<TeachingJoint> teaching_joints_;
+    std::chrono::steady_clock::time_point teaching_renewed_;
     std::vector<float> gravity_float_baseline_;  ///< Joint positions at float entry (rad).
     float gravity_float_abort_rad_ = kGravityFloatAbortRadDefault;  ///< Runaway threshold (rad).
 

@@ -46,6 +46,7 @@ from .protocol import (
     CAP_GRAVITY_COMP,
     CAP_LIVE_INPUT,
     CAP_MOVE_TO_READY,
+    CAP_TEACHING,
     JOINT_STRUCT,
     PROTOCOL_VERSION,
     ArmTopics,
@@ -834,6 +835,7 @@ class NativeArmBackend(ArmBackend):
                     supports_gravity_compensation=bool(flags & CAP_GRAVITY_COMP),
                     supports_force_feedback=bool(flags & CAP_FORCE_FEEDBACK),
                     supports_move_to_ready=bool(flags & CAP_MOVE_TO_READY),
+                    supports_teaching=bool(flags & CAP_TEACHING),
                     button_names=self._input_layout.button_names,
                     axis_names=self._input_layout.axis_names,
                 )
@@ -939,6 +941,12 @@ class NativeArmBackend(ArmBackend):
             try:
                 payload = encode_command(command, floats=floats, ints=(request_id,))
                 deadline = time.monotonic() + timeout_s
+                next_send = 0.0
+                retry_period = (
+                    0.02
+                    if command in {NativeCommand.ENTER_TEACHING, NativeCommand.CONFIGURE_TEACHING}
+                    else 0.2
+                )
                 with self._condition:
                     while request_id not in self._acks:
                         self._raise_if_hardware_fault()
@@ -946,13 +954,18 @@ class NativeArmBackend(ArmBackend):
                             raise self._stopped_process_error(
                                 "native process stopped before command acknowledgement"
                             )
-                        self._lifecycle_pub.send(payload)
-                        remaining = deadline - time.monotonic()
+                        now = time.monotonic()
+                        remaining = deadline - now
                         if remaining <= 0:
                             raise ProtocolError(
                                 f"timed out waiting for {command.name} acknowledgement"
                             )
-                        self._condition.wait(min(remaining, 0.2))
+                        # State/status notifications also wake this condition.
+                        # Do not turn every feedback frame into a queued retry.
+                        if now >= next_send:
+                            self._lifecycle_pub.send(payload)
+                            next_send = now + retry_period
+                        self._condition.wait(min(remaining, max(0, next_send - now)))
                     result = self._acks.pop(request_id)
             finally:
                 with self._condition:
@@ -995,9 +1008,7 @@ class NativeArmBackend(ArmBackend):
             self._raise_if_hardware_fault()
             if self._closed or not self._running:
                 if self._reader_error is not None:
-                    raise NativeProcessError(
-                        f"native protocol reader failed: {self._reader_error}"
-                    )
+                    raise NativeProcessError(f"native protocol reader failed: {self._reader_error}")
                 raise NativeProcessError("native process is not running")
             while self._inputs is None:
                 self._raise_if_hardware_fault()
@@ -1101,6 +1112,25 @@ class NativeArmBackend(ArmBackend):
         self._send_lifecycle(
             NativeCommand.SET_TORQ_RESCALE, floats=tuple(float(value) for value in values)
         )
+
+    def configure_teaching(self, joints: tuple[tuple[float, ...], ...]) -> None:
+        for index, values in enumerate(joints):
+            self._send_lifecycle(NativeCommand.CONFIGURE_TEACHING, floats=(float(index), *values))
+
+    def enter_teaching(self) -> None:
+        with self._mode_lock:
+            with self._condition:
+                reader = self._reader
+            self._send_lifecycle(NativeCommand.ENTER_TEACHING)
+            self._replace_mode(ArmMode.TEACHING, expected_reader=reader)
+
+    def renew_teaching(self) -> None:
+        # Loop-owned, best-effort liveness. Never wait for a status-channel ACK
+        # or renew in the background: missed sends expire the native lease.
+        with self._lifecycle_lock:
+            if not self._running or self._lifecycle_pub is None:
+                raise CommandRejectedError("arm is not connected")
+            self._lifecycle_pub.send(encode_command(NativeCommand.RENEW_TEACHING))
 
     def servo_reports(self) -> dict[int, JointServoReport]:
         with self._condition:

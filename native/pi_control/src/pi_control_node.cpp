@@ -215,6 +215,7 @@ int main(int argc, char** argv) {
             if (p_device->supports_gravity_float()) {
                 capability_flags |= PI_CONTROL_CAP_GRAVITY_COMP;
             }
+            if (p_device->supports_teaching()) capability_flags |= PI_CONTROL_CAP_TEACHING;
         } else if (p_device->is_read_only()) {
             // Read-only leader (passive encoders, e.g. ARX_ENC): cannot produce torque,
             // so gravity compensation and force feedback are not available. The arm

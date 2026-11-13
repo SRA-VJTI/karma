@@ -50,7 +50,88 @@ ReturnCode Device::runtime_hold() {
     if (rejects_direct_commands()) {
         return ReturnCode::BUSY;
     }
+    if (teaching_active_) {
+        teaching_active_ = false;
+        ReturnCode rc = set_control_mode(Role::FOLLOWER, ControlModeIntent::NORMAL_OPERATION);
+        if (rc != ReturnCode::SUCCESS) return rc;
+    }
     clear_command_buffers_for_move_to_ready();
+    return ReturnCode::SUCCESS;
+}
+
+ReturnCode Device::configure_teaching_joint(int index, const TeachingJoint& config) {
+    if (!supports_teaching()) return ReturnCode::NOT_SUPPORTED;
+    if (teaching_active_ || rejects_direct_commands()) return ReturnCode::BUSY;
+    if (index < 0 || index >= dof_ ||
+        !config.valid(model_ == "E_Yam" ? 0.5f : 2.0f)) return ReturnCode::INVALID_PARAM;
+    teaching_joints_.resize(static_cast<size_t>(dof_));
+    teaching_joints_[index] = config;
+    teaching_joints_[index].configured = true;
+    return ReturnCode::SUCCESS;
+}
+
+ReturnCode Device::set_runtime_teaching(bool enabled) {
+    if (!enabled) return runtime_hold();
+    if (!supports_teaching()) return ReturnCode::NOT_SUPPORTED;
+    if (rejects_direct_commands() || gravity_float_active_) return ReturnCode::BUSY;
+    if (teaching_joints_.size() != static_cast<size_t>(dof_)) return ReturnCode::INVALID_PARAM;
+    for (size_t i = 0; i < static_cast<size_t>(dof_); ++i) {
+        auto* joint = teaching_joint(i);
+        const auto& config = teaching_joints_[i];
+        const float q = joint->get_pos_rad_relative(), v = joint->get_vel_rad_sec();
+        if (!config.configured || !config.valid(model_ == "E_Yam" ? 0.5f : 2.0f) ||
+            !std::isfinite(q) || !std::isfinite(v) ||
+            q < joint->get_pos_min_relative() || q > joint->get_pos_max_relative() ||
+            std::fabs(v) > config.velocity_limit || joint->get_frame_age_ms() < 0 ||
+            joint->get_frame_age_ms() > 100) {
+            return ReturnCode::INVALID_PARAM;
+        }
+    }
+    // MIT torque-only commands below set kp=kd=0; damping is explicit and bounded
+    // through the existing joint torque conversion, not the position gains.
+    clear_command_buffers_for_move_to_ready();
+    teaching_active_ = true;
+    teaching_renewed_ = std::chrono::steady_clock::now();
+    return ReturnCode::SUCCESS;
+}
+
+ReturnCode Device::renew_teaching() {
+    if (!teaching_active_) return ReturnCode::BUSY;
+    // An overdue renewal cannot resurrect a lost lease before the next torque tick.
+    if (std::chrono::steady_clock::now() - teaching_renewed_ > std::chrono::milliseconds(250)) {
+        return runtime_hold();
+    }
+    teaching_renewed_ = std::chrono::steady_clock::now();
+    return ReturnCode::SUCCESS;
+}
+
+ReturnCode Device::apply_teaching_torques(const std::vector<float>& gravity) {
+    if (!teaching_active_ || teaching_joints_.size() != static_cast<size_t>(dof_))
+        return ReturnCode::BUSY;
+    // Arm gravity buffers include an effector slot; this device owns only dof_ joints.
+    if (gravity.size() < static_cast<size_t>(dof_)) return ReturnCode::INVALID_PARAM;
+    bool stop = std::chrono::steady_clock::now() - teaching_renewed_ > std::chrono::milliseconds(250);
+    for (size_t i = 0; i < static_cast<size_t>(dof_); ++i) {
+        auto* joint = teaching_joint(i);
+        const float q = joint->get_pos_rad_relative(), v = joint->get_vel_rad_sec();
+        stop = stop || !std::isfinite(q) || !std::isfinite(v) || !std::isfinite(gravity[i]) ||
+               q < joint->get_pos_min_relative() || q > joint->get_pos_max_relative() ||
+               std::fabs(v) > teaching_joints_[i].velocity_limit || joint->get_frame_age_ms() < 0 ||
+               joint->get_frame_age_ms() > 100;
+    }
+    if (stop) {
+        PI_WARN("%s_%s: teaching lease/state/velocity guard; returning to HOLD", model_.c_str(), id_.c_str());
+        return runtime_hold();
+    }
+    for (size_t i = 0; i < static_cast<size_t>(dof_); ++i) {
+        auto* joint = teaching_joint(i);
+        // DM feedback velocity is raw motor-frame (unlike relative position).
+        // Convert to joint frame for the profile, then back for the motor.
+        const float direction = joint->get_dir_invert();
+        const float tau = gravity[i] + teaching_joints_[i].torque(joint->get_vel_rad_sec() * direction) * direction;
+        ReturnCode rc = joint->apply_torque(tau);
+        if (rc != ReturnCode::SUCCESS) return rc;
+    }
     return ReturnCode::SUCCESS;
 }
 

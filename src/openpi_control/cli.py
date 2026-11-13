@@ -50,12 +50,14 @@ import contextlib
 import json
 import os
 import pathlib
+import platform
 import subprocess
 import sys
 import threading
 import time
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING
@@ -275,6 +277,35 @@ def can_bitrate(interface: str) -> int | None:
     return int(bitrate) if bitrate else None
 
 
+def check_can_controller(interface: str) -> CheckResult:
+    """Read netlink status: a link can be administratively UP but BUS-OFF."""
+    try:
+        completed = subprocess.run(
+            ["ip", "-details", "-json", "link", "show", "dev", interface],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise ValueError("ip failed")
+        data = json.loads(completed.stdout)[0]["linkinfo"]["info_data"]
+        state = data["state"]
+        if not isinstance(state, str):
+            raise ValueError("invalid CAN state")
+    except (OSError, subprocess.SubprocessError, ValueError, LookupError, TypeError):
+        return CheckResult(_WARN, "CAN controller", "status unavailable; inspect ip -details link")
+    if state == "ERROR-ACTIVE":
+        return CheckResult(_OK, "CAN controller", state)
+    if state in {"BUS-OFF", "STOPPED", "SLEEPING", "ERROR-PASSIVE", "ERROR-WARNING"}:
+        return CheckResult(
+            _FAIL,
+            "CAN controller",
+            f"{state}; check power, wiring, termination and bitrate before enabling motors",
+        )
+    return CheckResult(_WARN, "CAN controller", f"unrecognized state: {state}")
+
+
 # --------------------------------------------------------------------------- #
 # doctor
 # --------------------------------------------------------------------------- #
@@ -362,6 +393,7 @@ def run_doctor(
                 state or "unknown",
             )
         )
+        results.append(check_can_controller(interface))
         want = _catalog_baudrate(assets.model_config)
         have = can_bitrate(interface)
         if want is None:
@@ -402,9 +434,7 @@ def run_doctor(
         CheckResult(
             _OK if cached else _WARN,
             "visual meshes",
-            str(cached)
-            if cached
-            else f"not cached — karma-viz --fetch-meshes --model {model}",
+            str(cached) if cached else f"not cached — karma-viz --fetch-meshes --model {model}",
         )
     )
 
@@ -754,6 +784,9 @@ def preflight_rig(rig: Rig) -> tuple[int, list[tuple[str, list[CheckResult]]]]:
     adapter does not come half up: bringing the good arm to a hold and then
     aborting would leave it stiff with no session left to put it down.
     """
+    mapping = check_rig_interfaces(rig)
+    if mapping.status == _FAIL:
+        return 1, [("rig", [mapping])]
     failures = 0
     reports: list[tuple[str, list[CheckResult]]] = []
     for rig_arm in rig.arms:
@@ -763,6 +796,25 @@ def preflight_rig(rig: Rig) -> tuple[int, list[tuple[str, list[CheckResult]]]]:
         failures += sum(1 for result in results if result.status == _FAIL)
         reports.append((rig_arm.name, results))
     return failures, reports
+
+
+def check_rig_interfaces(rig: Rig) -> CheckResult:
+    """Each native arm process owns a distinct bus; check after arm selection."""
+    owners: dict[str, str] = {}
+    for arm in rig.arms:
+        # Resolve serial symlinks too, so by-id and tty names cannot open one bus twice.
+        interface = (
+            str(Path(arm.interface).resolve()) if arm.interface.startswith("/") else arm.interface
+        )
+        if interface in owners:
+            return CheckResult(
+                _FAIL,
+                "bus ownership",
+                f"{owners[interface]} and {arm.name} share {arm.interface}; "
+                "assign a separate interface to each arm",
+            )
+        owners[interface] = arm.name
+    return CheckResult(_OK, "bus ownership", "one interface per selected arm")
 
 
 def power_up(
@@ -785,6 +837,9 @@ def power_up(
     """
     from .session import ArmSession
 
+    mapping = check_rig_interfaces(rig)
+    if mapping.status == _FAIL:
+        raise ConfigurationError(mapping.detail)
     if backend_factory is None:
         from .so101_calibration import verify_firmware
 
@@ -2816,6 +2871,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    teach = sub.add_parser("teach", help="hand-guide YAM arms with calibrated friction assistance")
+    teach.add_argument("--rig", choices=("yam_bimanual",), default="yam_bimanual")
+    teach.add_argument("--arm", choices=("both", "left", "right"), default="both")
+    teach.add_argument("--interface", action="append", metavar="ARM=BUS")
+    teach.add_argument("--config", type=Path, help="per-arm teaching JSON")
+    teach.add_argument("--write-config", type=Path, help="write an uncalibrated example and exit")
+    teach.add_argument("--record", action="store_true")
+    teach.add_argument("--repo-id")
+    teach.add_argument("--task")
+    teach.add_argument("--root", type=Path)
+    teach.add_argument("--fps", type=int, default=30)
+    teach.add_argument("--camera", action="append", metavar="ROLE=DEVICE")
+    teach.add_argument("--camera-serial", action="append", default=[], metavar="ROLE=SERIAL")
+
     doctor = sub.add_parser("doctor", help="read-only preflight checks for an arm or a rig")
     _add_common(doctor, required=False)
     doctor.add_argument(
@@ -2839,6 +2908,12 @@ def main(argv: list[str] | None = None) -> int:
         "--probe",
         action="store_true",
         help="also open the bus and listen for traffic (reads only, never sends)",
+    )
+    doctor.add_argument(
+        "--report",
+        type=Path,
+        metavar="PATH",
+        help="save a JSON readiness report (does not validate physical motion or compensation)",
     )
 
     calibrate_so101 = sub.add_parser(
@@ -3080,6 +3155,11 @@ def main(argv: list[str] | None = None) -> int:
         "--server",
         default="http://127.0.0.1:8202",
         help="MolmoAct server URL or host:port; /act is appended automatically",
+    )
+    infer.add_argument(
+        "--flash-policy",
+        action="store_true",
+        help="use the task-specific Flash ACT contract and synchronous chunk blending",
     )
     infer.add_argument(
         "--instruction", required=True, help="language instruction sent with every observation"
@@ -3770,6 +3850,7 @@ def main(argv: list[str] | None = None) -> int:
     log_path = runlog.setup_run_logging(args.command)
 
     commands = {
+        "teach": _command_teach,
         "doctor": _command_doctor,
         "zero": _command_zero,
         "live": _command_live,
@@ -3866,6 +3947,12 @@ def _calibrated_teleop_config(rig, overrides=None):
     return config
 
 
+def _command_teach(args: argparse.Namespace, log_path: Path) -> int:
+    from .teaching import run_cli
+
+    return run_cli(args, log_path)
+
+
 def _command_doctor(args: argparse.Namespace, log_path: Path) -> int:
     if args.rig is not None:
         if args.model is not None or args.interface is not None:
@@ -3885,20 +3972,70 @@ def _command_doctor(args: argparse.Namespace, log_path: Path) -> int:
     warnings = sum(1 for result in results if result.status == _WARN)
     print(f"\n{len(results)} checks, {failures} failed, {warnings} warned")
     print(f"log: {log_path}")
+    _write_doctor_report(
+        args,
+        log_path,
+        [
+            {
+                "name": args.model,
+                "model": args.model,
+                "interface": args.interface,
+                "effector": args.effector,
+                "checks": [asdict(result) for result in results],
+            }
+        ],
+    )
     return 1 if failures else 0
+
+
+def _write_doctor_report(args: argparse.Namespace, log_path: Path, groups: list[dict]) -> None:
+    if args.report is None:
+        return
+    checks = [check for group in groups for check in group["checks"]]
+    report = {
+        "schema": "karma.doctor.v1",
+        "created_at": datetime.now(UTC).isoformat(),
+        "platform": platform.system(),
+        "rig": args.rig,
+        "probe_requested": "passive-listen" if args.probe else "none",
+        "failures": sum(check["status"] == _FAIL for check in checks),
+        "warnings": sum(check["status"] == _WARN for check in checks),
+        "physical_validation": "not_performed",
+        "log_path": str(log_path),
+        "groups": groups,
+    }
+    try:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(json.dumps(report, indent=2) + "\n")
+    except OSError as err:
+        raise ConfigurationError(f"cannot write doctor report {args.report}: {err}") from err
+    print(f"report: {args.report}")
 
 
 def _doctor_rig(args: argparse.Namespace, log_path: Path) -> int:
     """Every arm of a rig, checked with the same code ``live`` preflights with."""
     rig = resolve_rig(args.rig).with_interfaces(_parse_interface_overrides(args.interface_override))
     print(f"doctor: rig {rig.name} — {rig.description}")
-    failures = warnings = 0
+    mapping = check_rig_interfaces(rig)
+    print(mapping.render())
+    groups = [{"name": "rig", "checks": [asdict(mapping)]}]
+    failures = int(mapping.status == _FAIL)
+    warnings = 0
     for rig_arm in rig.arms:
         results = run_doctor(
             rig_arm.model,
             rig_arm.interface,
             effector_model=rig_arm.effector_model,
-            probe=args.probe,
+            probe=args.probe and mapping.status != _FAIL,
+        )
+        groups.append(
+            {
+                "name": rig_arm.name,
+                "model": rig_arm.model,
+                "interface": rig_arm.interface,
+                "effector": rig_arm.effector_model,
+                "checks": [asdict(result) for result in results],
+            }
         )
         failures += sum(1 for result in results if result.status == _FAIL)
         warnings += sum(1 for result in results if result.status == _WARN)
@@ -3916,11 +4053,13 @@ def _doctor_rig(args: argparse.Namespace, log_path: Path) -> int:
     print(f"\ncameras ({len(rig.cameras)} declared):")
     for result in camera_results:
         print(result.render())
+    groups.append({"name": "cameras", "checks": [asdict(result) for result in camera_results]})
 
     print(
         f"\n{len(rig.arms)} arms, {len(rig.cameras)} cameras, {failures} failed, {warnings} warned"
     )
     print(f"log: {log_path}")
+    _write_doctor_report(args, log_path, groups)
     return 1 if failures else 0
 
 
@@ -4224,6 +4363,25 @@ def _runtime_preflight(rig: Rig, *, camera_overrides=None) -> bool:
 def _command_infer(args: argparse.Namespace, log_path: Path) -> int:
     """Preflight and run the hardware-coupled MolmoAct2 loop."""
     rig = _configured_rig(args)
+    policy = None
+    if args.flash_policy:
+        from .flash_policy import CONTRACT, TAG, FlashChunkClient
+
+        if args.reach_actions or args.reset_start_pose or args.carry_targets:
+            raise ConfigurationError("Flash requires bounded execution without reset/carry targets")
+        if rig.policy_norm_tag not in (None, TAG):
+            raise ConfigurationError("Flash requires --norm-tag yam_flash_act_v1")
+        rig = replace(rig, policy_norm_tag=TAG)
+        if PolicyContract.from_rig(rig) != CONTRACT:
+            raise ConfigurationError("Flash requires the default bimanual YAM camera/arm contract")
+        args.prefetch = False
+        policy = FlashChunkClient(
+            args.server,
+            fps=args.control_rate,
+            instruction=args.instruction,
+            timeout_s=args.request_timeout,
+            jpeg_quality=args.jpeg_quality,
+        )
 
     overrides = cameras_mod.parse_camera_overrides(args.camera)
     if not args.skip_preflight and not _runtime_preflight(
@@ -4234,6 +4392,7 @@ def _command_infer(args: argparse.Namespace, log_path: Path) -> int:
     status = run_infer(
         rig,
         instruction=args.instruction,
+        policy=policy,
         server=args.server,
         request_timeout_s=args.request_timeout,
         num_steps=args.num_steps,

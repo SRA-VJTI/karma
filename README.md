@@ -322,6 +322,7 @@ runs in your MolmoAct2 environment.
 | [Inference](docs/inference.md) | Policy contract, HTTP payload, health check, policy frames |
 | [Model servers](docs/model-servers.md) | The YAM and SO100 MolmoAct2 servers Karma connects to |
 | [YAM setup](docs/yam-setup.md) | CAN buses, zeros, home, teaching handle |
+| [Flash-ALOHA on YAM](docs/flash-yam.md) | YAM kinesthetic teaching, ACT policy pipeline, and scissor-style grip CAD |
 | [SO101 setup](docs/so101-teleop.md) | Calibration wizard, teleop, IK tuning, Quest troubleshooting |
 | [Recording](docs/recording.md) | LeRobot v3 dataset schema |
 | [DAgger](docs/dagger.md) | HITL workflow and intervention labels |

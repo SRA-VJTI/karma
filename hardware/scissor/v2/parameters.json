@@ -1,0 +1,33 @@
+{
+  "units": "mm",
+  "revision": "v2_split_clamp_leads",
+  "reference_i2rt_commit": "61b1ebda80d0b3839843bb06fadf42b6b83bd3c4",
+  "jaw_root_y_start": 72.0,
+  "jaw_root_y_end": 90.0,
+  "clamp_outer_x": -36.0,
+  "clamp_inner_wall_x": -24.0,
+  "clamp_lip_x": -3.2,
+  "clamp_bottom_z": -40.6,
+  "jaw_cavity_bottom_z": -34.6,
+  "jaw_cavity_top_z": 34.6,
+  "cap_top_z": 40.6,
+  "wall_top_z": 33.6,
+  "bolt_x": -30.0,
+  "bolt_y": [
+    76.0,
+    86.0
+  ],
+  "bolt_clearance": 3.4,
+  "nut_across_flats": 5.8,
+  "handle_x_start": -24.0,
+  "handle_thickness": 10.0,
+  "handle_backward_pitch_deg": 15.0,
+  "thumb_inner_radius": 14.0,
+  "thumb_wall": 6.0,
+  "strap_width": 12.0,
+  "strap_slot_width": 13.0,
+  "strap_slot_height": 2.6,
+  "strap_thickness_visual": 1.2,
+  "jaw_travel_each": 47.5,
+  "cad_fit_status": "mesh_checked_prototype_physical_fit_and_load_unverified"
+}

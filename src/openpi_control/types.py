@@ -45,6 +45,7 @@ class ArmMode(StrEnum):
     MOVE_TO_READY = "move_to_ready"
     RECOVERY = "recovery"
     CLOSED = "closed"
+    TEACHING = "teaching"  # append-only: native MODE packets use enum indices
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +233,7 @@ class ArmCapabilities:
     button_names: tuple[str, ...] = ()
     axis_names: tuple[str, ...] = ()
     max_bilateral_gain: float = 0.3
+    supports_teaching: bool = False
 
     @property
     def dof(self) -> int:

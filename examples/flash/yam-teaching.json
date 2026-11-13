@@ -1,0 +1,126 @@
+{
+  "schema": "karma.yam_teaching.v1",
+  "note": "Uncalibrated: gravity plus damping only. Tune each physical arm independently.",
+  "arms": {
+    "left": {
+      "joints": [
+        {
+          "coulomb_nm": 0.0,
+          "viscous_nm_s": 0.0,
+          "transition_rad_s": 0.05,
+          "compensation_limit_nm": 0.0,
+          "velocity_limit_rad_s": 0.5,
+          "damping_nm_s": 0.1
+        },
+        {
+          "coulomb_nm": 0.0,
+          "viscous_nm_s": 0.0,
+          "transition_rad_s": 0.05,
+          "compensation_limit_nm": 0.0,
+          "velocity_limit_rad_s": 0.5,
+          "damping_nm_s": 0.1
+        },
+        {
+          "coulomb_nm": 0.0,
+          "viscous_nm_s": 0.0,
+          "transition_rad_s": 0.05,
+          "compensation_limit_nm": 0.0,
+          "velocity_limit_rad_s": 0.5,
+          "damping_nm_s": 0.1
+        },
+        {
+          "coulomb_nm": 0.0,
+          "viscous_nm_s": 0.0,
+          "transition_rad_s": 0.05,
+          "compensation_limit_nm": 0.0,
+          "velocity_limit_rad_s": 0.5,
+          "damping_nm_s": 0.1
+        },
+        {
+          "coulomb_nm": 0.0,
+          "viscous_nm_s": 0.0,
+          "transition_rad_s": 0.05,
+          "compensation_limit_nm": 0.0,
+          "velocity_limit_rad_s": 0.5,
+          "damping_nm_s": 0.1
+        },
+        {
+          "coulomb_nm": 0.0,
+          "viscous_nm_s": 0.0,
+          "transition_rad_s": 0.05,
+          "compensation_limit_nm": 0.0,
+          "velocity_limit_rad_s": 0.5,
+          "damping_nm_s": 0.1
+        },
+        {
+          "coulomb_nm": 0.0,
+          "viscous_nm_s": 0.0,
+          "transition_rad_s": 0.05,
+          "compensation_limit_nm": 0.0,
+          "velocity_limit_rad_s": 0.5,
+          "damping_nm_s": 0.1
+        }
+      ]
+    },
+    "right": {
+      "joints": [
+        {
+          "coulomb_nm": 0.0,
+          "viscous_nm_s": 0.0,
+          "transition_rad_s": 0.05,
+          "compensation_limit_nm": 0.0,
+          "velocity_limit_rad_s": 0.5,
+          "damping_nm_s": 0.1
+        },
+        {
+          "coulomb_nm": 0.0,
+          "viscous_nm_s": 0.0,
+          "transition_rad_s": 0.05,
+          "compensation_limit_nm": 0.0,
+          "velocity_limit_rad_s": 0.5,
+          "damping_nm_s": 0.1
+        },
+        {
+          "coulomb_nm": 0.0,
+          "viscous_nm_s": 0.0,
+          "transition_rad_s": 0.05,
+          "compensation_limit_nm": 0.0,
+          "velocity_limit_rad_s": 0.5,
+          "damping_nm_s": 0.1
+        },
+        {
+          "coulomb_nm": 0.0,
+          "viscous_nm_s": 0.0,
+          "transition_rad_s": 0.05,
+          "compensation_limit_nm": 0.0,
+          "velocity_limit_rad_s": 0.5,
+          "damping_nm_s": 0.1
+        },
+        {
+          "coulomb_nm": 0.0,
+          "viscous_nm_s": 0.0,
+          "transition_rad_s": 0.05,
+          "compensation_limit_nm": 0.0,
+          "velocity_limit_rad_s": 0.5,
+          "damping_nm_s": 0.1
+        },
+        {
+          "coulomb_nm": 0.0,
+          "viscous_nm_s": 0.0,
+          "transition_rad_s": 0.05,
+          "compensation_limit_nm": 0.0,
+          "velocity_limit_rad_s": 0.5,
+          "damping_nm_s": 0.1
+        },
+        {
+          "coulomb_nm": 0.0,
+          "viscous_nm_s": 0.0,
+          "transition_rad_s": 0.05,
+          "compensation_limit_nm": 0.0,
+          "velocity_limit_rad_s": 0.5,
+          "damping_nm_s": 0.1
+        }
+      ]
+    }
+  }
+}

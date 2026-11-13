@@ -47,6 +47,7 @@ ReturnCode DeviceArm::set_control_mode(Role target_role, ControlModeIntent inten
     // - NORMAL_OPERATION: follow target_role (leader vs follower).
     //
     // The CAN device subclass may override hardware-specific behavior.
+    teaching_hold_reports_ = 0;
     const bool use_follower_like = (intent == ControlModeIntent::READY_MOVE_OVERRIDE) || (target_role == Role::FOLLOWER);
     ReturnCode rc = ReturnCode::SUCCESS;
 
@@ -80,12 +81,18 @@ ReturnCode DeviceArm::set_control_mode(Role target_role, ControlModeIntent inten
         // float: move-to-ready and emergency recovery must never fight the
         // float branch of operate_as_follower().
         gravity_float_active_ = false;
+        teaching_active_ = false;
+        if (p_effector_ && !is_in_emergency_recovery() && p_effector_->teaching_active()) {
+            rc = p_effector_->set_runtime_teaching(false);
+            if (rc != ReturnCode::SUCCESS) return rc;
+        }
     }
 
     return ReturnCode::SUCCESS;
 }
 
 ReturnCode DeviceArm::set_runtime_gravity_float(bool enabled, float abort_drift_rad) {
+    if (enabled && teaching_active_) return ReturnCode::BUSY;
     if (role_ != Role::FOLLOWER) {
         return ReturnCode::NOT_SUPPORTED;
     }
@@ -160,6 +167,14 @@ ReturnCode DeviceArm::set_runtime_torq_rescale(const std::vector<float>& values)
 }
 
 ReturnCode DeviceArm::publish_next_servo_param() {
+    // Prefer live teaching mode over static servo calibration telemetry. A
+    // single transition packet can be lost on the bounded PUB/SUB channel.
+    if (!is_in_emergency_recovery() && !gravity_float_active_ &&
+        (teaching_active_ || teaching_hold_reports_ > 0)) {
+        std::vector<int> mode{teaching_active_ ? 9 : 2};
+        if (!teaching_active_) --teaching_hold_reports_;
+        return publish_device_info(DEVICE_INFO_RUNTIME_MODE, nullptr, &mode);
+    }
     if (joints_.empty()) {
         return ReturnCode::SUCCESS;
     }
@@ -186,13 +201,57 @@ ReturnCode DeviceArm::publish_next_servo_param() {
 }
 
 ReturnCode DeviceArm::runtime_hold() {
+    const bool was_teaching = teaching_active_;
     if (gravity_float_active_) {
         ReturnCode return_code = set_runtime_gravity_float(false, 0.0f);
         if (return_code != ReturnCode::SUCCESS) {
             return return_code;
         }
     }
-    return Device::runtime_hold();
+    ReturnCode rc = Device::runtime_hold();
+    if (p_effector_ && (was_teaching || p_effector_->teaching_active())) {
+        ReturnCode eff_rc = p_effector_->runtime_hold();
+        if (rc == ReturnCode::SUCCESS) rc = eff_rc;
+    }
+    if (was_teaching) {
+        teaching_hold_reports_ = 10;
+        std::vector<int> mode{2};  // ArmMode.HOLD (append-only Python enum ABI)
+        publish_device_info(DEVICE_INFO_RUNTIME_MODE, nullptr, &mode);
+    }
+    return rc;
+}
+
+ReturnCode DeviceArm::configure_teaching_joint(int index, const TeachingJoint& config) {
+    if (!supports_teaching()) return ReturnCode::NOT_SUPPORTED;
+    if (teaching_active_ || rejects_direct_commands()) return ReturnCode::BUSY;
+    if (index == dof_) return p_effector_->configure_teaching_joint(0, config);
+    return Device::configure_teaching_joint(index, config);
+}
+
+ReturnCode DeviceArm::set_runtime_teaching(bool enabled) {
+    if (!enabled) return runtime_hold();
+    if (!supports_teaching()) return ReturnCode::NOT_SUPPORTED;
+    ReturnCode rc = Device::set_runtime_teaching(true);
+    if (rc != ReturnCode::SUCCESS) return rc;
+    rc = p_effector_->set_runtime_teaching(true);
+    if (rc != ReturnCode::SUCCESS) {
+        runtime_hold();
+        return rc;
+    }
+    teaching_hold_reports_ = 0;
+    std::vector<int> mode{9};  // ArmMode.TEACHING, appended after CLOSED
+    publish_device_info(DEVICE_INFO_RUNTIME_MODE, nullptr, &mode);
+    return ReturnCode::SUCCESS;
+}
+
+ReturnCode DeviceArm::renew_teaching() {
+    ReturnCode rc = Device::renew_teaching();
+    if (rc != ReturnCode::SUCCESS || !teaching_active_) return rc;
+    rc = p_effector_->renew_teaching();
+    if (rc != ReturnCode::SUCCESS || !p_effector_->teaching_active()) {
+        runtime_hold();
+    }
+    return rc;
 }
 
 ReturnCode DeviceArm::set_runtime_force_feedback(bool enabled, float gain) {
@@ -1242,6 +1301,8 @@ ReturnCode DeviceArm::process_follower_msg(const MsgJoints& msg_joints) {
 }
 
 ReturnCode DeviceArm::apply_action(const MsgJoints& msg) {
+    if (teaching_active_) return ReturnCode::BUSY;
+    teaching_hold_reports_ = 0;
     ReturnCode return_code = ReturnCode::SUCCESS;
 
     if (msg.joints_.size() != static_cast<size_t>(dof_total_)) {
@@ -1838,6 +1899,17 @@ ReturnCode DeviceArm::operate_as_leader() {
 
 ReturnCode DeviceArm::operate_as_follower() {
     ReturnCode return_code = ReturnCode::SUCCESS;
+
+    if (teaching_active_) {
+        if (!p_effector_->teaching_active()) return runtime_hold();
+        for (size_t i = 0; i < joints_.size(); ++i) {
+            current_motor_positions_[i] = joints_[i]->get_pos_rad_relative() * joints_[i]->get_dir_invert();
+        }
+        return_code = p_algo_->gravity_compensation(current_motor_positions_, target_tor_);
+        if (return_code != ReturnCode::SUCCESS) return return_code;
+        for (size_t i = 0; i < joints_.size(); ++i) target_tor_[i] *= joints_[i]->gravity_comp_factor_;
+        return apply_teaching_torques(target_tor_);
+    }
 
     if (is_read_only() == true) {
         // Read-only arm (e.g. ARX encoder leader): the joints cannot be driven, so

@@ -1,0 +1,17 @@
+{
+  "schema": "yam_flash_act_v1",
+  "fps": 30,
+  "image_size": [
+    240,
+    320
+  ],
+  "masks": {
+    "top": [],
+    "left_wrist": [],
+    "right_wrist": []
+  },
+  "chunk_size": 50,
+  "execute_steps": 25,
+  "blend_steps": 10,
+  "task": "pick up the cup"
+}

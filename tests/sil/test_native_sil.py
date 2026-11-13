@@ -1712,3 +1712,69 @@ def test_leader_recovery_goes_silent_instead_of_steering_the_follower(fake_bus_w
         with pytest.raises((StateTimeoutError, NativeProcessError)):
             for _ in range(3):
                 leader.read_state(timeout_s=2.0)
+
+
+def test_yam_teaching_arm_and_gripper_lease_returns_to_hold(fake_bus_with_gripper):
+    """Real node, seven simulated motors: torque-only teaching and native lease expiry."""
+    from openpi_control import ArmConfig, ArmMode, ArmSession, SocketCanConnection
+    from openpi_control.teaching import FrictionJoint, TeachingProfile
+
+    bus = fake_bus_with_gripper
+    session = ArmSession()
+    follower = session.add_follower(
+        ArmConfig(
+            "sil-teaching",
+            "Yam",
+            SocketCanConnection(VCAN),
+            effector_model="E_Yam",
+            follower_gravity_compensation=True,
+        )
+    )
+    with session:
+        session.connect()
+        follower.read_state(timeout_s=20)
+        assert follower.capabilities.supports_teaching
+        follower.configure_teaching(TeachingProfile(tuple(FrictionJoint() for _ in range(7))))
+        follower.enter_teaching()
+        enter_request_id = follower._backend._request_id
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            try:
+                follower.renew_teaching()
+            except Exception:
+                print("".join(follower._backend._log_lines))
+                print("servo commands:", {m: bus.last_command(m) for m in range(1, 8)})
+                raise
+            time.sleep(0.03)
+        assert follower.read_state(timeout_s=2).mode is ArmMode.TEACHING
+        for motor in range(1, 8):
+            assert bus.last_command(motor)[2] == pytest.approx(0, abs=0.02)
+            assert bus.last_kd(motor) == pytest.approx(0, abs=0.02)
+        # Keep Python/native generic heartbeat alive, but stop teaching renewal.
+        wait_for(
+            lambda: follower.read_state(timeout_s=2).mode is ArmMode.HOLD,
+            timeout_s=2,
+            what="teaching lease expiry",
+        )
+        wait_for(
+            lambda: all(bus.last_command(m)[2] > 0 for m in range(1, 8)),
+            timeout_s=2,
+            what="position hold for arm and gripper",
+        )
+
+        follower.renew_teaching()  # late best-effort renewal must never reactivate motion
+        time.sleep(0.1)
+        assert follower.read_state(timeout_s=2).mode is ArmMode.HOLD
+        assert "entering emergency recovery" not in "".join(follower._backend._log_lines)
+
+        from openpi_control.protocol import NativeCommand, encode_command
+
+        # An ENTER retry that was delayed in transport must not re-arm the
+        # expired lease. Only a new operator entry request may do that.
+        with follower._backend._lifecycle_lock:
+            follower._backend._lifecycle_pub.send(
+                encode_command(NativeCommand.ENTER_TEACHING, ints=(enter_request_id,))
+            )
+        time.sleep(0.3)
+        assert follower.read_state(timeout_s=2).mode is ArmMode.HOLD
+        assert all(bus.last_command(m)[2] > 0 for m in range(1, 8))
